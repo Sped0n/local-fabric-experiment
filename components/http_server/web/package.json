@@ -1,0 +1,18 @@
+{
+  "name": "local-fabric-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build && gzip -n -9 -c dist/ui.js > ../ui.js.gz && gzip -n -9 -c dist/ui.css > ../ui.css.gz"
+  },
+  "dependencies": {
+    "@solidjs/web": "2.0.0",
+    "solid-js": "2.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "tailwindcss": "4.3.3",
+    "vite": "8.3.8",
+    "@solidjs/vite-plugin": "3.0.1"
+  }
+}

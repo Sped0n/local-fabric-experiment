@@ -1,0 +1,6 @@
+dependencies:
+  sped0n/esp_matter: "==1.7.0-rc0.2"
+  espressif/lua:
+    version: "==5.5.1"
+    matches:
+      - if: $CONFIG{FABRIC_AUTOMATION} == True

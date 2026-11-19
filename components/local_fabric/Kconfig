@@ -1,0 +1,60 @@
+menu "Local Fabric"
+
+    config FABRIC_AUTOMATION
+        bool "Enable local state-triggered automation"
+        default n
+
+    config FABRIC_AUTOMATION_TIMING
+        bool "Log synchronized minute batch timings"
+        depends on FABRIC_AUTOMATION
+        default n
+        help
+            Report worker time and VM calls at minute boundaries, plus delay resumption time and deadline lateness.
+
+    config FABRIC_CORE_MAX_LISTENERS
+        int "Maximum core listeners"
+        range 1 16
+        default 4
+
+    config FABRIC_MANAGER_MAX_DEVICES
+        int "Maximum resolved devices"
+        range 1 64
+        default 16
+
+    config FABRIC_MANAGER_MAX_ENDPOINTS
+        int "Maximum reported endpoints"
+        range 1 128
+        default 32
+
+    config FABRIC_MANAGER_MAX_CLUSTERS_PER_ENDPOINT
+        int "Maximum selected clusters per endpoint"
+        range 1 32
+        default 16
+        help
+            Bounds selected cluster adapters and the per-endpoint cluster mask.
+
+    config FABRIC_MANAGER_MAX_DEVICE_TYPES_PER_ENDPOINT
+        int "Maximum Matter device types per endpoint"
+        range 1 16
+        default 4
+        help
+            Bounds Descriptor DeviceTypeList entries retained per endpoint.
+            Reports exceeding this limit are rejected atomically.
+
+    config FABRIC_MANAGER_MAX_TAGS_PER_ENDPOINT
+        int "Maximum Matter semantic tags per endpoint"
+        range 1 16
+        default 4
+        help
+            Bounds Descriptor TagList entries inspected for an endpoint name.
+            Additional tags are ignored; tags never determine topology validity.
+
+    config FABRIC_MANAGER_MAX_REPORT_RELATIONSHIPS
+        int "Maximum Matter parent-child relationships per report"
+        range 1 256
+        default 64
+        help
+            Bounds Descriptor PartsList relationships retained in one atomic
+            report transaction. Higher values increase transaction heap use.
+
+endmenu

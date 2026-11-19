@@ -1,0 +1,9 @@
+build/
+node_modules/
+dist/
+build-contract/
+managed_components/
+sdkconfig
+sdkconfig.old
+sdkconfig.local
+.test/

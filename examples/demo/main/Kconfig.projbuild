@@ -1,0 +1,20 @@
+menu "Local fabric demo"
+    config DEMO_SSID
+        string "Wi-Fi SSID"
+        default ""
+    config DEMO_PASSWORD
+        string "Wi-Fi password"
+        default ""
+    config DEMO_TIMEZONE
+        string "Rule clock POSIX timezone"
+        depends on FABRIC_AUTOMATION
+        default "UTC0"
+        help
+            Board-local time for Lua conditions. Use a POSIX TZ string, not an IANA name.
+    config DEMO_NTP_SERVER
+        string "Rule clock NTP server"
+        depends on FABRIC_AUTOMATION
+        default "pool.ntp.org"
+        help
+            Use a LAN NTP server if the board cannot reach the public pool.
+endmenu

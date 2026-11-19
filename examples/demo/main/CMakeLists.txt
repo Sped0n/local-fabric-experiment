@@ -1,0 +1,10 @@
+if(FABRIC_MODEL_TEST)
+    set(main_src "../../../tests/model_contract.cpp")
+else()
+    set(main_src demo.c console.c)
+    if(CONFIG_FABRIC_AUTOMATION)
+        list(APPEND main_src rule_clock.c demo_automation.c)
+    endif()
+endif()
+idf_component_register(SRCS ${main_src} json_memory.c PRIV_INCLUDE_DIRS "../../../components/local_fabric/private"
+    PRIV_REQUIRES console esp_http_client local_fabric http_server esp_wifi esp_event esp_netif nvs_flash sped0n__esp_matter espressif__cjson)
