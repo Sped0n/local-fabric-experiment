@@ -45,7 +45,7 @@ async function main() {
     const def = {
       title: prefix + slot,
       enabled: true,
-      mode: "raw",
+
       when,
       source,
     };

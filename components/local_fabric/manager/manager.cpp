@@ -81,7 +81,7 @@ void on_node_set_changed(fabric_core_handle_t, void *user_ctx)
         if (error == ESP_OK && changed) {
             data_model::device_set previous = manager->set;
             manager->set = filtered;
-            data_model::publish(manager, FABRIC_DEVICE_METADATA | FABRIC_DEVICE_STATE);
+            manager_signal_changes(manager, FABRIC_DEVICE_METADATA | FABRIC_DEVICE_STATE);
             filtered = {};
             data_model::model::free(&previous);
         }
@@ -111,13 +111,13 @@ void on_subscription_changed(fabric_core_handle_t, const fabric_core_subscriptio
             }
         }
         if (changed)
-            data_model::publish(manager, FABRIC_DEVICE_STATE, update->node_id);
+            manager_signal_changes(manager, FABRIC_DEVICE_STATE, update->node_id);
     }
 }
 
 } // namespace
 
-void data_model::publish(fabric_manager_handle_t manager, unsigned views, uint64_t node_id)
+void manager_signal_changes(fabric_manager_handle_t manager, unsigned views, uint64_t node_id)
 {
     uint32_t mask = node_id ? 0 : UINT32_MAX;
     for (size_t i = 0; node_id && i < manager->set.device_count; i++)
@@ -150,7 +150,7 @@ esp_err_t fabric_manager_create(fabric_core_handle_t core, fabric_manager_handle
         fabric_manager_delete(manager);
         return error;
     }
-    const fabric_core_private_listener listener = {
+    const core_model_listener listener = {
         .node_set_changed = on_node_set_changed,
         .subscription_changed = on_subscription_changed,
         .report_begin = data_model::report_begin,
@@ -158,7 +158,7 @@ esp_err_t fabric_manager_create(fabric_core_handle_t core, fabric_manager_handle
         .report_end = data_model::report_end,
         .user_ctx = manager,
     };
-    error = fabric_core_private_set_listener(core, &listener);
+    error = core_set_model_listener(core, &listener);
     if (error != ESP_OK) {
         fabric_manager_delete(manager);
         return error;
@@ -175,7 +175,7 @@ esp_err_t fabric_manager_delete(fabric_manager_handle_t manager)
         if (s.notify)
             return ESP_ERR_INVALID_STATE;
     if (manager->core) {
-        const esp_err_t error = fabric_core_private_clear_listener(manager->core, manager);
+        const esp_err_t error = core_clear_model_listener(manager->core, manager);
         if (error != ESP_OK && error != ESP_ERR_NOT_FOUND)
             return error;
     }
@@ -366,7 +366,7 @@ esp_err_t fabric_manager_set_device_identity(fabric_manager_handle_t manager, fa
         if (error != ESP_OK)
             *device = previous;
         else
-            data_model::publish(manager, FABRIC_DEVICE_METADATA, device->node_id);
+            manager_signal_changes(manager, FABRIC_DEVICE_METADATA, device->node_id);
     }
     return error;
 }

@@ -35,15 +35,15 @@ void fabric_http_status_changed(void)
     changed(1u << MCP_STATUS);
 }
 #if CONFIG_FABRIC_AUTOMATION
-static void rules_changed(void)
+static void rules_changed(bool trace)
 {
-    changed(1u << MCP_RULES);
+    changed(1u << (trace ? MCP_RUNS : MCP_RULES));
 }
 #endif
 static void devices_changed(void *ctx, unsigned views, uint32_t devices)
 {
-    unsigned mask =
-        (views & FABRIC_DEVICE_METADATA ? 1u << MCP_METADATA : 0) | (views & FABRIC_DEVICE_STATE ? 1u << MCP_STATE : 0);
+    unsigned mask = (views & FABRIC_DEVICE_METADATA ? 1u << MCP_METADATA : 0) |
+        (views & FABRIC_DEVICE_STATE ? 1u << MCP_STATE : 0) | (views & FABRIC_DEVICE_ACTIVITY ? 1u << MCP_ACTIVITY : 0);
     portENTER_CRITICAL(&lock);
     for (size_t i = 0; i < 6; i++) {
         streams[i].dirty |= streams[i].interests & mask;
@@ -52,7 +52,7 @@ static void devices_changed(void *ctx, unsigned views, uint32_t devices)
     }
     portEXIT_CRITICAL(&lock);
 }
-esp_err_t mcp_watch_start(fabric_manager_handle_t manager, fabric_automation_t automation)
+esp_err_t mcp_subscriptions_start(fabric_manager_handle_t manager, fabric_automation_t automation)
 {
 #if CONFIG_FABRIC_AUTOMATION
     if (automation)
@@ -151,7 +151,7 @@ static void stream_loop(void *arg)
     release_stream(s);
     vTaskDelete(NULL);
 }
-esp_err_t mcp_listen(httpd_req_t *r, const char *id, const cJSON *params)
+esp_err_t mcp_subscriptions_listen(httpd_req_t *r, const char *id, const cJSON *params)
 {
     const cJSON *filter = cJSON_GetObjectItemCaseSensitive(params, "notifications"),
                 *uris = cJSON_GetObjectItemCaseSensitive(filter, "resourceSubscriptions");

@@ -73,7 +73,6 @@ esp_err_t fabric_core_create(const fabric_core_config_t *config, fabric_core_han
         core->nodes = static_cast<fabric_core_node *>(calloc(config->max_nodes, sizeof(*core->nodes)));
     }
     core->stop_event = xSemaphoreCreateBinary();
-    core->next_listener_id = 1;
     if (core->nodes == nullptr || core->stop_event == nullptr) {
         if (core->stop_event != nullptr) {
             vSemaphoreDelete(core->stop_event);
@@ -203,7 +202,7 @@ esp_err_t fabric_core_delete(fabric_core_handle_t core)
     {
         esp_matter::lock::ScopedChipStackLock lock(portMAX_DELAY);
         can_delete =
-            core->lifecycle == FABRIC_CORE_STOPPED && core->active_requests == 0 && !core->private_listener_installed;
+            core->lifecycle == FABRIC_CORE_STOPPED && core->active_requests == 0 && !core->model_listener_installed;
     }
     ESP_RETURN_ON_FALSE(can_delete, ESP_ERR_INVALID_STATE, kTag, "core is active");
 
@@ -215,73 +214,34 @@ esp_err_t fabric_core_delete(fabric_core_handle_t core)
     return ESP_OK;
 }
 
-esp_err_t fabric_core_private_set_listener(fabric_core_handle_t core, const fabric_core_private_listener *listener)
+esp_err_t core_set_model_listener(fabric_core_handle_t core, const core_model_listener *listener)
 {
-    ESP_RETURN_ON_FALSE(core && listener, ESP_ERR_INVALID_ARG, kTag, "private listener is required");
+    ESP_RETURN_ON_FALSE(core && listener, ESP_ERR_INVALID_ARG, kTag, "model listener is required");
     ESP_RETURN_ON_FALSE(!fabric_core_called_from_chip_context(), ESP_ERR_INVALID_STATE, kTag,
                         "cannot set listener from a CHIP callback");
 
     esp_matter::lock::ScopedChipStackLock lock(portMAX_DELAY);
-    if (core->private_listener_installed) {
+    if (core->model_listener_installed) {
         return ESP_ERR_INVALID_STATE;
     }
-    core->private_listener = *listener;
-    core->private_listener_installed = true;
+    core->model_listener = *listener;
+    core->model_listener_installed = true;
     return ESP_OK;
 }
 
-esp_err_t fabric_core_private_clear_listener(fabric_core_handle_t core, void *user_ctx)
+esp_err_t core_clear_model_listener(fabric_core_handle_t core, void *user_ctx)
 {
     ESP_RETURN_ON_FALSE(core, ESP_ERR_INVALID_ARG, kTag, "core is required");
     ESP_RETURN_ON_FALSE(!fabric_core_called_from_chip_context(), ESP_ERR_INVALID_STATE, kTag,
                         "cannot clear listener from a CHIP callback");
 
     esp_matter::lock::ScopedChipStackLock lock(portMAX_DELAY);
-    if (!core->private_listener_installed || core->private_listener.user_ctx != user_ctx) {
+    if (!core->model_listener_installed || core->model_listener.user_ctx != user_ctx) {
         return ESP_ERR_NOT_FOUND;
     }
-    memset(&core->private_listener, 0, sizeof(core->private_listener));
-    core->private_listener_installed = false;
+    memset(&core->model_listener, 0, sizeof(core->model_listener));
+    core->model_listener_installed = false;
     return ESP_OK;
-}
-
-esp_err_t fabric_core_add_listener(fabric_core_handle_t core, const fabric_core_listener_t *listener,
-                                   fabric_core_listener_id_t *out_listener_id)
-{
-    ESP_RETURN_ON_FALSE(core && listener && out_listener_id, ESP_ERR_INVALID_ARG, kTag,
-                        "listener and output are required");
-    ESP_RETURN_ON_FALSE(!fabric_core_called_from_chip_context(), ESP_ERR_INVALID_STATE, kTag,
-                        "cannot add listener from a CHIP callback");
-
-    esp_matter::lock::ScopedChipStackLock lock(portMAX_DELAY);
-    for (auto &entry : core->listeners) {
-        if (entry.id == 0) {
-            if (core->next_listener_id == 0) {
-                return ESP_ERR_NO_MEM;
-            }
-            entry.id = core->next_listener_id++;
-            entry.listener = *listener;
-            *out_listener_id = entry.id;
-            return ESP_OK;
-        }
-    }
-    return ESP_ERR_NO_MEM;
-}
-
-esp_err_t fabric_core_remove_listener(fabric_core_handle_t core, fabric_core_listener_id_t listener_id)
-{
-    ESP_RETURN_ON_FALSE(core && listener_id, ESP_ERR_INVALID_ARG, kTag, "core and listener id are required");
-    ESP_RETURN_ON_FALSE(!fabric_core_called_from_chip_context(), ESP_ERR_INVALID_STATE, kTag,
-                        "cannot remove listener from a CHIP callback");
-
-    esp_matter::lock::ScopedChipStackLock lock(portMAX_DELAY);
-    for (auto &entry : core->listeners) {
-        if (entry.id == listener_id) {
-            memset(&entry, 0, sizeof(entry));
-            return ESP_OK;
-        }
-    }
-    return ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t fabric_core_get_node_ids(fabric_core_handle_t core, uint64_t *node_ids, size_t capacity, size_t *out_count)

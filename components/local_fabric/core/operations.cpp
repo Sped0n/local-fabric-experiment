@@ -5,10 +5,12 @@
  */
 #include "fabric_core_private.h"
 
+#include "cJSON.h"
 #include "esp_matter.h"
 #include "esp_matter_client.h"
 #include "esp_matter_controller_client.h"
 #include "json_to_tlv.h"
+#include "tlv_to_json.h"
 
 #include <app/ReadClient.h>
 #include <app/WriteClient.h>
@@ -16,6 +18,7 @@
 #include <lib/core/TLV.h>
 #include <platform/CHIPDeviceLayer.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -69,6 +72,72 @@ private:
     fabric_core_operation_t operation_;
 };
 
+void copy_value_text(fabric_core_value_t &value, const char *data, size_t size)
+{
+    const size_t copied = std::min(size, sizeof(value.text) - 1);
+    memcpy(value.text, data, copied);
+    value.text[copied] = '\0';
+    value.truncated = copied != size;
+}
+
+CHIP_ERROR decode_tlv_value(chip::TLV::TLVReader &reader, fabric_core_value_t &value)
+{
+    value = {};
+    switch (reader.GetType()) {
+    case chip::TLV::kTLVType_Null:
+        value.type = FABRIC_CORE_VALUE_NULL;
+        return CHIP_NO_ERROR;
+    case chip::TLV::kTLVType_Boolean:
+        value.type = FABRIC_CORE_VALUE_BOOL;
+        return reader.Get(value.data.boolean);
+    case chip::TLV::kTLVType_SignedInteger:
+        value.type = FABRIC_CORE_VALUE_SIGNED;
+        return reader.Get(value.data.signed_value);
+    case chip::TLV::kTLVType_UnsignedInteger:
+        value.type = FABRIC_CORE_VALUE_UNSIGNED;
+        return reader.Get(value.data.unsigned_value);
+    case chip::TLV::kTLVType_FloatingPointNumber:
+        value.type = FABRIC_CORE_VALUE_FLOAT;
+        return reader.Get(value.data.float_value);
+    case chip::TLV::kTLVType_UTF8String: {
+        chip::CharSpan span;
+        ReturnErrorOnFailure(reader.Get(span));
+        value.type = FABRIC_CORE_VALUE_STRING;
+        copy_value_text(value, span.data(), span.size());
+        return CHIP_NO_ERROR;
+    }
+    case chip::TLV::kTLVType_ByteString: {
+        chip::ByteSpan span;
+        ReturnErrorOnFailure(reader.Get(span));
+        value.type = FABRIC_CORE_VALUE_OCTETS;
+        static constexpr char kHex[] = "0123456789abcdef";
+        const size_t bytes = std::min(span.size(), (sizeof(value.text) - 1) / 2);
+        for (size_t index = 0; index < bytes; ++index) {
+            value.text[index * 2] = kHex[span[index] >> 4];
+            value.text[index * 2 + 1] = kHex[span[index] & 0x0f];
+        }
+        value.text[bytes * 2] = '\0';
+        value.truncated = bytes != span.size();
+        return CHIP_NO_ERROR;
+    }
+    default: {
+        chip::TLV::TLVReader copy;
+        copy.Init(reader);
+        cJSON *json = nullptr;
+        esp_err_t error =
+            esp_matter::tlv_to_json(copy, &json, esp_matter::tlv_to_json_options{.human_readable_bytes = true});
+        VerifyOrReturnError(error == ESP_OK && json != nullptr, CHIP_ERROR_INVALID_TLV_ELEMENT);
+        char *text = cJSON_PrintUnformatted(json);
+        cJSON_Delete(json);
+        VerifyOrReturnError(text != nullptr, CHIP_ERROR_NO_MEMORY);
+        value.type = FABRIC_CORE_VALUE_JSON;
+        copy_value_text(value, text, strlen(text));
+        cJSON_free(text);
+        return CHIP_NO_ERROR;
+    }
+    }
+}
+
 class read_operation final : public fabric_core_operation, public client::read_command::delegate {
 public:
     using fabric_core_operation::fabric_core_operation;
@@ -84,7 +153,7 @@ public:
         if (result != ESP_OK || !data)
             return;
         chip::TLV::TLVReader copy = *data;
-        result = fabric_core_from_chip_error(fabric_core_decode_tlv_value(copy, value));
+        result = fabric_core_from_chip_error(decode_tlv_value(copy, value));
     }
     void OnDone(const client::target_t &, CHIP_ERROR err) override
     {

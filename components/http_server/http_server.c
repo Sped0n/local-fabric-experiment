@@ -27,7 +27,7 @@ static const char *state(operation_t op)
     return !op.used ? "idle" : op.pending ? "pending" : esp_err_to_name(op.result);
 }
 
-char *fabric_status_json(void)
+char *http_status_json(void)
 {
     char body[256];
     portENTER_CRITICAL(&lock);
@@ -61,7 +61,7 @@ static uint32_t number(const cJSON *obj, const char *name, uint32_t max, bool *v
     return (uint32_t)v->valuedouble;
 }
 
-esp_err_t fabric_control_submit(const char *route, const cJSON *obj)
+esp_err_t http_submit_control(const char *route, const cJSON *obj)
 {
     if (!strcmp(route, "/cancel"))
         return fabric_core_cancel_commissioning(core);

@@ -6,11 +6,11 @@
 static fabric_manager_handle_t manager;
 static fabric_automation_t automation;
 extern const char rule_schema[] asm("_binary_rule_definition_json_start");
-const char *const mcp_resource_uris[MCP_RESOURCE_COUNT] = {[MCP_STATUS] = "fabric://status",
-                                                           [MCP_METADATA] = "fabric://devices/metadata",
-                                                           [MCP_STATE] = "fabric://devices/state",
-                                                           [MCP_RULES] = "fabric://automation/rules",
-                                                           [MCP_ACTIONS] = "fabric://automation/actions"};
+const char *const mcp_resource_uris[MCP_RESOURCE_COUNT] = {
+    [MCP_STATUS] = "fabric://status",          [MCP_METADATA] = "fabric://devices/metadata",
+    [MCP_STATE] = "fabric://devices/state",    [MCP_ACTIVITY] = "fabric://activity",
+    [MCP_RULES] = "fabric://automation/rules", [MCP_ACTIONS] = "fabric://automation/actions",
+    [MCP_RUNS] = "fabric://automation/runs"};
 int mcp_resource_index(const char *uri)
 {
     for (int i = 0; uri && i < (automation ? MCP_RESOURCE_COUNT : MCP_RULES); i++)
@@ -157,7 +157,19 @@ static esp_err_t read_resource(httpd_req_t *r, const char *id, const char *uri)
 {
     int index = mcp_resource_index(uri);
     char *json = NULL;
-    if (index < 0) {
+#if CONFIG_FABRIC_AUTOMATION
+    const char prefix[] = "fabric://automation/runs/";
+    if (automation && uri && !strncmp(uri, prefix, sizeof(prefix) - 1)) {
+        const char *cursor = uri + sizeof(prefix) - 1;
+        uint32_t run = 0;
+        if (!uri_id(&cursor, UINT32_MAX, &run) || *cursor || !run)
+            return mcp_error(r, id, -32002, "Unknown run");
+        esp_err_t err = fabric_automation_runs(automation, run, &json);
+        if (err == ESP_ERR_NOT_FOUND)
+            return mcp_error(r, id, -32002, "Run no longer available");
+    } else
+#endif
+        if (index < 0) {
         fabric_property_path_t p;
         cJSON *prop = NULL;
         if (!mcp_property_path(uri, &p))
@@ -170,7 +182,9 @@ static esp_err_t read_resource(httpd_req_t *r, const char *id, const char *uri)
         cJSON_Delete(prop);
     }
     if (index == MCP_STATUS)
-        json = fabric_status_json();
+        json = http_status_json();
+    if (index == MCP_ACTIVITY)
+        fabric_manager_activity_json(manager, &json);
     if (index == MCP_METADATA || index == MCP_STATE)
         fabric_manager_devices_json(manager, index == MCP_METADATA ? FABRIC_DEVICE_METADATA : FABRIC_DEVICE_STATE,
                                     &json);
@@ -179,6 +193,8 @@ static esp_err_t read_resource(httpd_req_t *r, const char *id, const char *uri)
         fabric_automation_list(automation, &json);
     if (index == MCP_ACTIONS)
         fabric_automation_list_actions(automation, &json);
+    if (index == MCP_RUNS)
+        fabric_automation_runs(automation, 0, &json);
 #endif
     if (!json)
         return mcp_unavailable(r);
@@ -231,7 +247,7 @@ static esp_err_t call_tool(httpd_req_t *r, const char *id, const char *name, con
     esp_err_t err = ESP_ERR_INVALID_ARG;
     char *json = NULL, diagnostic[128] = {0};
     if (tool->route)
-        err = fabric_control_submit(tool->route, args);
+        err = http_submit_control(tool->route, args);
     else if (!strcmp(name, "device.set_identity"))
         err = fabric_manager_set_device_identity(
             manager, (uint32_t)cJSON_GetObjectItemCaseSensitive(args, "device_id")->valuedouble,
@@ -282,11 +298,18 @@ esp_err_t mcp_catalog_request(httpd_req_t *r, const char *id, const char *method
             "serverInfo\":{\"name\":\"local-fabric\",\"version\":\"1\"}}}");
     if (!strcmp(method, "ping"))
         return mcp_result(r, id, MCP_COMPLETE);
-    if (!strcmp(method, "resources/templates/list"))
-        return mcp_result(r, id,
-                          "{\"resultType\":\"complete\"," MCP_CACHE ",\"resourceTemplates\":[{\"name\":\"device "
-                          "property\",\"uriTemplate\":\"fabric://devices/{device}/endpoints/{endpoint}/clusters/"
-                          "{cluster}/properties/{property}\",\"mimeType\":\"application/json\"}]}");
+    if (!strcmp(method, "resources/templates/list")) {
+        const char *prop = "{\"name\":\"device "
+                           "property\",\"uriTemplate\":\"fabric://devices/{device}/endpoints/{endpoint}/clusters/"
+                           "{cluster}/properties/{property}\",\"mimeType\":\"application/json\"}";
+        char body[512];
+        snprintf(body, sizeof(body), "{\"resultType\":\"complete\"," MCP_CACHE ",\"resourceTemplates\":[%s%s]}", prop,
+                 automation
+                     ? ",{\"name\":\"automation "
+                       "run\",\"uriTemplate\":\"fabric://automation/runs/{id}\",\"mimeType\":\"application/json\"}"
+                     : "");
+        return mcp_result(r, id, body);
+    }
     if (!strcmp(method, "tools/list") || !strcmp(method, "resources/list"))
         return list_items(r, id, !strcmp(method, "tools/list"));
     if (!strcmp(method, "resources/read"))

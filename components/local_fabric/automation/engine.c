@@ -1,16 +1,16 @@
-#include "fabric_automation.h"
-#include "action_runner.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "fabric_automation.h"
+#include "fabric_utf8.h"
+#include "hooks.h"
 #include "lauxlib.h"
-#include "local_actions.h"
 #include "lua.h"
 #include "nvs.h"
 #include "nvs_flash.h"
-#include "property_test.h"
-#include "rule_source.h"
+#include "runner.h"
+#include "trace.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -27,9 +27,12 @@ typedef struct {
 } input_t;
 typedef struct {
     unsigned count;
+    uint32_t id;
+    char title[65];
+    automation_trace_start_t run; // Nonzero id only until the sequence terminates.
     bool named, clock;
     uint32_t devices;
-    bool enabled, visual;
+    bool enabled;
     char *definition, *body;
     uint32_t epochs[FABRIC_MANAGER_PROPERTY_BATCH_MAX];
     cJSON *previous;
@@ -38,26 +41,28 @@ typedef struct {
 } rule_t;
 struct fabric_automation {
     fabric_manager_handle_t manager;
-    const fabric_rule_action_t *actions;
-    size_t count;
+    const fabric_automation_hook_t *hooks;
+    size_t hook_count;
     nvs_handle_t storage;
     rule_t *slots[SLOT_COUNT];
-    action_runner_t *runner;
+    automation_runner_t *runner;
+    automation_trace_ring_t *trace;
+    uint32_t next_rule_id;
     TaskHandle_t worker;
     SemaphoreHandle_t mutex, done;
     bool stop, clock_synced;
-    void (*changed)(void);
+    void (*changed)(bool trace);
 };
 typedef struct {
     fabric_automation_t service;
     size_t allocated;
-    action_step_t *first, *last;
+    automation_step_t *first, *last;
     unsigned step_count;
+    bool blocked;
     cJSON *scratch;
-    const cJSON *before, *current, *def;
+    const cJSON *before, *current;
     const rule_t *rule;
-    char *compiled;
-    char diagnostic[96];
+    char diagnostic[160];
 } invocation_t;
 static const cJSON *field(const cJSON *obj, const char *key)
 {
@@ -175,7 +180,7 @@ static bool clock_ready(fabric_automation_t a)
 } // VM execution is serialized by service mutex.
 // Advertised action arguments are flat named scalars. Do not recursively walk
 // arbitrary Lua tables or retain pointers to VM-managed strings after the call.
-static char *action_args(lua_State *L, int index, const fabric_rule_action_t *local)
+static char *action_args(lua_State *L, int index, const fabric_automation_hook_t *local)
 {
     luaL_checktype(L, index, LUA_TTABLE);
     cJSON *obj = cJSON_CreateObject();
@@ -207,16 +212,16 @@ static char *action_args(lua_State *L, int index, const fabric_rule_action_t *lo
         }
         lua_pop(L, 1);
     }
-    char *args = ok && (!local || local_action_accepts(local, obj)) ? cJSON_PrintUnformatted(obj) : NULL;
+    char *args = ok && (!local || automation_hook_args_valid(local, obj)) ? cJSON_PrintUnformatted(obj) : NULL;
     cJSON_Delete(obj);
     return args;
 }
-static action_step_t *append_step(lua_State *L)
+static automation_step_t *append_step(lua_State *L)
 {
     invocation_t *c = context(L);
     if (!c || c->step_count >= RULE_MAX_STEPS)
         luaL_error(L, "at most eight action steps");
-    action_step_t *p = heap_caps_calloc(1, sizeof(*p), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    automation_step_t *p = heap_caps_calloc(1, sizeof(*p), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!p)
         luaL_error(L, "out of memory");
     if (c->last)
@@ -236,21 +241,21 @@ static int delay(lua_State *L)
 static int invoke(lua_State *L)
 {
     invocation_t *call = context(L);
-    action_step_t *p = append_step(L);
+    automation_step_t *p = append_step(L);
     bool local = lua_toboolean(L, lua_upvalueindex(1));
     if (local) {
         const char *name = name_arg(L, 1, 48);
-        p->native = local_action_find(call->service->actions, call->service->count, name);
-        if (!p->native)
+        p->hook = automation_hook_find(call->service->hooks, call->service->hook_count, name);
+        if (!p->hook)
             return luaL_error(L, "unknown local action");
     } else {
-        p->native = NULL;
+        p->hook = NULL;
         p->device = coordinate(L, 1, 1, UINT32_MAX);
         p->endpoint = coordinate(L, 2, 0, UINT16_MAX);
         strcpy(p->cluster, name_arg(L, 3, sizeof(p->cluster)));
         strcpy(p->name, name_arg(L, 4, sizeof(p->name)));
     }
-    p->args = action_args(L, local ? 2 : 5, p->native);
+    p->args = action_args(L, local ? 2 : 5, p->hook);
     if (!p->args)
         return luaL_error(L, "invalid action arguments");
     return 0;
@@ -293,11 +298,29 @@ static void push_inputs(lua_State *L, const rule_t *r, const cJSON *values)
         lua_setfield(L, -2, in->name);
     }
 }
+// Terminate the invocation and discard all its queued actions.
+static int skip_run(lua_State *L)
+{
+    invocation_t *c = context(L);
+    size_t len;
+    const char *reason = luaL_checklstring(L, 1, &len);
+    if (!len)
+        return luaL_error(L, "expected a skip reason");
+    if (lua_gettop(L) > 1) {
+        const char *observed = lua_isboolean(L, 2) ? (lua_toboolean(L, 2) ? "true" : "false") : lua_tostring(L, 2);
+        lua_pushfstring(L, "%s: observed %s", reason, observed ? observed : "unavailable");
+    } else
+        lua_settop(L, 1);
+    c->blocked = true;
+    return lua_error(L);
+}
 static int run_body(lua_State *L)
 {
     invocation_t *c = context(L);
     const char *body = lua_touserdata(L, 1);
     lua_newtable(L);
+    lua_pushcfunction(L, skip_run);
+    lua_setfield(L, -2, "skip");
     lua_pushcfunction(L, delay);
     lua_setfield(L, -2, "delay");
     lua_pushcfunction(L, local_time);
@@ -326,20 +349,9 @@ static int run_body(lua_State *L)
 }
 static int compile_body(lua_State *L)
 {
-    invocation_t *c = context(L);
-    const char *source = string(c->def, "source");
-    if (!source) {
-        rule_source_push(L, c->def);
-        source = lua_tostring(L, -1);
-    }
+    const char *source = lua_touserdata(L, 1);
     if (luaL_loadbufferx(L, source, strlen(source), "rule", "t") != LUA_OK)
         return lua_error(L);
-    size_t bytes = strlen(source) + 1;
-    c->compiled = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (c->compiled)
-        memcpy(c->compiled, source, bytes);
-    if (!c->compiled)
-        return luaL_error(L, "out of memory");
     return 0;
 }
 static bool vm_call(invocation_t *c, lua_CFunction fn, const char *body)
@@ -357,20 +369,75 @@ static bool vm_call(invocation_t *c, lua_CFunction fn, const char *body)
         snprintf(c->diagnostic, sizeof(c->diagnostic), "%s", lua_tostring(L, -1));
     lua_close(L);
     cJSON_Delete(c->scratch);
-    return rc == LUA_OK;
+    return rc == LUA_OK || c->blocked;
 }
-static void action_done(void *ctx, unsigned slot, esp_err_t err)
+static void finish_trace(fabric_automation_t a, unsigned slot, const char *outcome, const char *reason)
+{
+    rule_t *r = a->slots[slot];
+    automation_trace_append(a->trace, &r->run, r->id, slot, r->title, outcome, reason);
+    r->run.id = 0;
+    if (a->changed)
+        a->changed(true);
+}
+static void action_done(void *ctx, unsigned slot, esp_err_t err, unsigned position, const automation_step_t *failed)
 {
     fabric_automation_t a = ctx;
+    char reason[160] = "";
+    if (err != ESP_OK) {
+        if (failed->hook)
+            snprintf(reason, sizeof(reason), "Step %u: %s: %s", position, failed->hook->name, esp_err_to_name(err));
+        else
+            snprintf(reason, sizeof(reason), "Step %u: #%lu/%u %s.%s: %s", position, (unsigned long)failed->device,
+                     failed->endpoint, failed->cluster, failed->name, esp_err_to_name(err));
+    }
+    finish_trace(a, slot, err == ESP_OK ? "completed" : "failed", reason);
     rule_t *r = a->slots[slot];
-    if (!r)
-        return;
     const char *msg = err == ESP_OK ? "completed" : esp_err_to_name(err);
     if (strcmp(msg, r->diagnostic)) {
-        snprintf(r->diagnostic, sizeof(r->diagnostic), "%s", msg);
+        fabric_utf8_copy(r->diagnostic, sizeof(r->diagnostic), msg);
         if (a->changed)
-            a->changed();
+            a->changed(false);
     }
+}
+static void describe_value(char *out, size_t n, const cJSON *v, bool clock)
+{
+    if (clock && cJSON_IsNumber(v)) {
+        time_t t = (time_t)v->valuedouble * 60;
+        struct tm local;
+        if (localtime_r(&t, &local) && strftime(out, n, "%a %H:%M", &local))
+            return;
+    }
+    if (cJSON_IsString(v))
+        fabric_utf8_copy(out, n, v->valuestring);
+    else if (cJSON_IsNumber(v))
+        snprintf(out, n, "%.8g", v->valuedouble);
+    else
+        fabric_utf8_copy(out, n, cJSON_IsTrue(v) ? "true" : cJSON_IsFalse(v) ? "false" : "unknown");
+}
+static void describe_trigger(automation_trace_start_t *run, const invocation_t *c)
+{
+    const rule_t *r = c->rule;
+    unsigned changes = 0;
+    char summary[192] = "";
+    for (unsigned i = 0; i < r->count; i++) {
+        const input_t *in = &r->inputs[i];
+        const cJSON *before = r->named ? field(c->before, in->name) : c->before,
+                    *after = r->named ? field(c->current, in->name) : c->current;
+        if (cJSON_Compare(before, after, true))
+            continue;
+        if (++changes > 1)
+            continue;
+        char old[24], now[24];
+        describe_value(old, sizeof(old), before, !in->path.device);
+        describe_value(now, sizeof(now), after, !in->path.device);
+        if (in->path.device)
+            snprintf(summary, sizeof(summary), "#%lu/%u %s.%s: %s → %s", (unsigned long)in->path.device,
+                     in->path.endpoint, in->path.cluster, in->path.property, old, now);
+        else
+            snprintf(summary, sizeof(summary), "Local clock: %s", now);
+    }
+    size_t prefix = changes > 1 ? snprintf(run->trigger, sizeof(run->trigger), "%u inputs changed: ", changes) : 0;
+    fabric_utf8_copy(run->trigger + prefix, sizeof(run->trigger) - prefix, summary);
 }
 static bool dispatch_value(fabric_automation_t a, unsigned slot, rule_t *r, const cJSON *value, const uint32_t *epochs,
                            bool baseline)
@@ -379,18 +446,30 @@ static bool dispatch_value(fabric_automation_t a, unsigned slot, rule_t *r, cons
     if (!reset && cJSON_Compare(value, r->previous, true))
         return false;
     cJSON *next = value && !cJSON_IsNull(value) ? cJSON_Duplicate(value, true) : NULL;
-    bool run = !reset && r->previous && next && !action_runner_active(a->runner, slot);
+    bool changed = !reset && r->previous && next;
+    bool run = changed && !automation_runner_active(a->runner, slot);
     if (run) {
-        invocation_t c = {.service = a, .rule = r, .before = r->previous, .current = next};
-        if (vm_call(&c, run_body, r->body) && c.first) {
-            action_runner_start(a->runner, slot, c.first);
-            snprintf(c.diagnostic, sizeof(c.diagnostic), "running");
-        } else
-            action_steps_free(c.first);
-        if (c.diagnostic[0] && strcmp(c.diagnostic, r->diagnostic)) {
-            strcpy(r->diagnostic, c.diagnostic);
+        invocation_t c = {.service = a, .before = r->previous, .current = next, .rule = r};
+        int64_t start = esp_timer_get_time();
+        bool ok = vm_call(&c, run_body, r->body);
+        // Preserve explicit Lua diagnostics on the rule resource; a no-action return is not a trace.
+        if (!c.blocked && c.diagnostic[0] && strncmp(r->diagnostic, c.diagnostic, sizeof(r->diagnostic) - 1)) {
+            fabric_utf8_copy(r->diagnostic, sizeof(r->diagnostic), c.diagnostic);
             if (a->changed)
-                a->changed();
+                a->changed(false);
+        }
+        if (!ok || c.blocked || c.first) {
+            ++a->trace->next_id;
+            if (!a->trace->next_id)
+                ++a->trace->next_id;
+            r->run = (automation_trace_start_t){
+                .id = a->trace->next_id, .start_us = start, .wall = a->clock_synced ? time(NULL) : 0};
+            describe_trigger(&r->run, &c);
+            if (!ok || c.blocked) {
+                finish_trace(a, slot, ok ? "skipped" : "failed", c.diagnostic);
+                automation_steps_free(c.first);
+            } else
+                automation_runner_start(a->runner, slot, c.first);
         }
     }
     cJSON_Delete(r->previous);
@@ -476,10 +555,10 @@ static void worker(void *ctx)
         xTaskNotifyWait(0, UINT32_MAX, &mask, wait);
         xSemaphoreTake(a->mutex, portMAX_DELAY);
         if (a->stop) {
-            for (unsigned i = 0; i < SLOT_COUNT; i++) action_runner_cancel(a->runner, i);
-            action_runner_advance(a->runner);
+            for (unsigned i = 0; i < SLOT_COUNT; i++) automation_runner_cancel(a->runner, i);
+            automation_runner_advance(a->runner);
             bool pending = false;
-            for (unsigned i = 0; i < SLOT_COUNT; i++) pending |= action_runner_active(a->runner, i);
+            for (unsigned i = 0; i < SLOT_COUNT; i++) pending |= automation_runner_active(a->runner, i);
             xSemaphoreGive(a->mutex);
             if (!pending)
                 break;
@@ -526,7 +605,7 @@ static void worker(void *ctx)
             }
             cJSON_Delete(values);
         }
-        int64_t deadline = action_runner_advance(a->runner);
+        int64_t deadline = automation_runner_advance(a->runner);
 #if CONFIG_FABRIC_AUTOMATION_TIMING
         if (tick && !reset)
             ESP_LOGI("rule_timing", "minute=%lld calls=%u dispatch_us=%lld batch_us=%lld", (long long)minute,
@@ -554,79 +633,18 @@ static void destroy(rule_t *r)
         free(r);
     }
 }
-static bool valid_test(fabric_automation_t a, const cJSON *spec, bool when, bool validate)
-{
-    fabric_property_path_t p = {0};
-    property_test_t test;
-    if (!selector(&p, spec) || !property_test_parse(&test, spec, when))
-        return false;
-    if (!validate)
-        return true;
-    cJSON *d = NULL;
-    bool ok = fabric_manager_property(a->manager, &p, &d, NULL) == ESP_OK && property_test_supported(&test, d);
-    cJSON_Delete(d);
-    return ok;
-}
 static bool valid_alias(const char *s)
 {
-    const char *letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
-    return strchr(letters, *s) &&
-        strspn(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") == strlen(s);
-}
-// Validate visual operands, not the clock predicate. Only generated Lua interprets them.
-static bool valid_clock(const cJSON *o, bool visual, bool named)
-{
-    const char *unit = string(o, "clock");
-    if (!unit || strcmp(unit, "minute"))
-        return false;
-    if (!visual)
-        return cJSON_GetArraySize(o) == 2;
-    const cJSON *day = field(o, "weekday"), *days = field(o, "weekdays"), *at = field(o, "at"),
-                *start = field(o, "start"), *end = field(o, "end");
-    if (cJSON_GetArraySize(o) !=
-        1 + named + (day != NULL) + (days != NULL) + (at != NULL) + (start != NULL) + (end != NULL))
-        return false;
-    if (day && (days || !integer(day, 1, 7)))
-        return false; // Existing single-day definitions.
-    if (days) {
-        if (!cJSON_IsArray(days) || cJSON_GetArraySize(days) < 1 || cJSON_GetArraySize(days) > 7)
-            return false;
-        unsigned seen = 0;
-        const cJSON *v;
-        cJSON_ArrayForEach(v, days)
-        {
-            if (!integer(v, 1, 7) || (seen & (1u << v->valueint)))
-                return false;
-            seen |= 1u << v->valueint;
-        }
-    }
-    if (at)
-        return named && !start && !end && integer(at, 0, 1439);
-    return (!start && !end) || (integer(start, 0, 1439) && integer(end, 1, 1440) && start->valueint < end->valueint);
-}
-static bool valid_step(fabric_automation_t a, const cJSON *action, bool validate)
-{
-    const cJSON *seconds = field(action, "delay_s");
-    if (seconds)
-        return cJSON_GetArraySize(action) == 1 && integer(seconds, 1, RULE_MAX_DELAY_SECONDS);
-    if (!cJSON_IsObject(field(action, "arguments")))
-        return false;
-    if (field(action, "native")) {
-        const char *name = string(action, "native");
-        if (!valid_name(name, 48) || cJSON_GetArraySize(action) != 2)
-            return false;
-        // Keep saved rules editable if an integration is missing after a firmware change.
-        return !validate ||
-            local_action_accepts(local_action_find(a->actions, a->count, name), field(action, "arguments"));
-    } else if (!integer(field(action, "device"), 1, UINT32_MAX) || !integer(field(action, "endpoint"), 0, UINT16_MAX) ||
-               !valid_name(string(action, "cluster"), 48) || !valid_name(string(action, "name"), 48))
-        return false;
-    return true;
+    const char *first = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_";
+    return s && *s && strchr(first, *s) &&
+        !s[strspn(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789")];
 }
 static esp_err_t prepare(fabric_automation_t a, const char *body, bool validate, rule_t **out, char *msg, size_t size)
 {
-    if (strlen(body) > 3072)
+    if (strlen(body) > 3072) {
+        snprintf(msg, size, "rule exceeds 3072 bytes");
         return ESP_ERR_INVALID_SIZE;
+    }
     cJSON *def = cJSON_ParseWithOpts(body, NULL, true);
     const cJSON *when = field(def, "when");
     bool named = cJSON_IsArray(when);
@@ -643,13 +661,19 @@ static esp_err_t prepare(fabric_automation_t a, const char *body, bool validate,
     }
     r->count = count;
     r->named = named;
-    const cJSON *conditions = field(def, "conditions"), *action = field(def, "action");
-    const char *mode = string(def, "mode");
-    if (!mode || !cJSON_IsBool(field(def, "enabled")) || field(def, "trigger") || field(def, "condition") ||
-        field(def, "becomes"))
+    const char *source = string(def, "source");
+    const cJSON *editor = field(def, "editor"), *member;
+    if (!source || !*source || !cJSON_IsBool(field(def, "enabled")) || (editor && !cJSON_IsObject(editor)) ||
+        (field(def, "title") && !string(def, "title")))
         goto failed;
+    cJSON_ArrayForEach(member, def)
+    {
+        if (strcmp(member->string, "source") && strcmp(member->string, "when") && strcmp(member->string, "editor") &&
+            strcmp(member->string, "title") && strcmp(member->string, "enabled"))
+            goto failed;
+    }
+    fabric_utf8_copy(r->title, sizeof(r->title), string(def, "title") ? string(def, "title") : "");
     r->enabled = cJSON_IsTrue(field(def, "enabled"));
-    r->visual = !strcmp(mode, "visual");
     for (int i = 0; i < count; i++) {
         input_t *in = &r->inputs[i];
         const cJSON *spec = named ? cJSON_GetArrayItem(when, i) : when;
@@ -662,7 +686,8 @@ static esp_err_t prepare(fabric_automation_t a, const char *body, bool validate,
                     goto failed;
         }
         if (field(spec, "clock")) {
-            if (!named || r->clock || !valid_clock(spec, r->visual, true))
+            if (!named || r->clock || !string(spec, "clock") || strcmp(string(spec, "clock"), "minute") ||
+                cJSON_GetArraySize(spec) != 2)
                 goto failed;
             r->clock = true;
             continue;
@@ -673,57 +698,28 @@ static esp_err_t prepare(fabric_automation_t a, const char *body, bool validate,
         for (int j = 0; j < i; j++)
             if (same_path(&in->path, &r->inputs[j].path))
                 goto failed;
-        if (r->visual) {
-            if (!valid_test(a, spec, !named, validate)) {
-                snprintf(msg, size, "trigger does not match property schema");
+        if (cJSON_GetArraySize(spec) != (named ? 5 : 4))
+            goto failed;
+        if (validate) {
+            cJSON *prop = NULL;
+            esp_err_t read = fabric_manager_property(a->manager, &in->path, &prop, NULL);
+            cJSON_Delete(prop);
+            if (read != ESP_OK) {
+                snprintf(msg, size, "unknown watched property");
                 goto failed;
-            }
-        } else {
-            if (cJSON_GetArraySize(spec) != (named ? 5 : 4))
-                goto failed;
-            if (validate) {
-                cJSON *prop = NULL;
-                esp_err_t read = fabric_manager_property(a->manager, &in->path, &prop, NULL);
-                cJSON_Delete(prop);
-                if (read != ESP_OK)
-                    goto failed;
             }
         }
     }
-    if (r->visual) {
-        if (field(def, "source"))
-            goto failed;
-        if ((conditions && !cJSON_IsArray(conditions)) || cJSON_GetArraySize(conditions) > 4)
-            goto failed;
-        const cJSON *c;
-        cJSON_ArrayForEach(c, conditions)
-        {
-            if (field(c, "clock") ? !valid_clock(c, true, false) : !valid_test(a, c, false, validate))
-                goto failed;
-        }
-        int steps = cJSON_IsArray(action) ? cJSON_GetArraySize(action) : 1;
-        if (steps < 1 || steps > RULE_MAX_STEPS)
-            goto failed;
-        for (int i = 0; i < steps; i++)
-            if (!valid_step(a, cJSON_IsArray(action) ? cJSON_GetArrayItem(action, i) : action, validate)) {
-                snprintf(msg, size, "invalid action or arguments at step %d", i + 1);
-                goto failed;
-            }
-    } else {
-        const char *source = string(def, "source");
-        if (strcmp(mode, "raw") || !source || !*source || conditions || action)
-            goto failed;
-    }
-    cJSON_DeleteItemFromObjectCaseSensitive(def, "diagnostic");
-    cJSON_DeleteItemFromObjectCaseSensitive(def, "generated");
-    invocation_t call = {.service = a, .def = def};
-    if (!vm_call(&call, compile_body, NULL)) {
+    invocation_t call = {.service = a};
+    if (!vm_call(&call, compile_body, source)) {
         snprintf(msg, size, "%s", call.diagnostic);
         goto failed;
     }
-    r->body = call.compiled;
+    r->body = heap_caps_malloc(strlen(source) + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (r->body)
+        strcpy(r->body, source);
     r->definition = cJSON_PrintUnformatted(def);
-    if (!r->definition) {
+    if (!r->definition || !r->body) {
         err = ESP_ERR_NO_MEM;
         goto failed;
     }
@@ -757,12 +753,17 @@ esp_err_t fabric_automation_save(fabric_automation_t a, unsigned slot, const cha
     if (err == ESP_OK)
         err = nvs_commit(a->storage);
     if (err == ESP_OK) {
-        action_runner_cancel(a->runner, slot - 1);
+        unsigned i = slot - 1;
+        if (a->slots[i] && a->slots[i]->run.id)
+            finish_trace(a, i, "cancelled", body ? "rule replaced" : "rule removed");
+        if (r)
+            r->id = a->slots[i] ? a->slots[i]->id : ++a->next_rule_id;
+        automation_runner_cancel(a->runner, slot - 1);
         destroy(a->slots[slot - 1]);
         a->slots[slot - 1] = r;
         r = NULL;
         if (a->changed)
-            a->changed();
+            a->changed(false);
         wake(a, UINT32_MAX);
     }
     xSemaphoreGive(a->mutex);
@@ -771,25 +772,26 @@ esp_err_t fabric_automation_save(fabric_automation_t a, unsigned slot, const cha
 }
 esp_err_t fabric_automation_list_actions(fabric_automation_t a, char **out)
 {
-    return a ? local_actions_json(a->actions, a->count, out) : ESP_ERR_INVALID_ARG;
+    return a ? automation_hooks_json(a->hooks, a->hook_count, out) : ESP_ERR_INVALID_ARG;
 }
-esp_err_t fabric_automation_init(fabric_manager_handle_t manager, const fabric_rule_action_t *actions, size_t count,
+esp_err_t fabric_automation_init(fabric_manager_handle_t manager, const fabric_automation_hook_t *hooks, size_t count,
                                  fabric_automation_t *out)
 {
-    if (!manager || !out || !local_actions_valid(actions, count))
+    if (!manager || !out || !automation_hooks_valid(hooks, count))
         return ESP_ERR_INVALID_ARG;
     fabric_automation_t a = calloc(1, sizeof(*a));
     if (!a)
         return ESP_ERR_NO_MEM;
     a->manager = manager;
-    a->actions = actions;
-    a->count = count;
-    a->runner = action_runner_create(a->manager, action_done, a);
+    a->hooks = hooks;
+    a->hook_count = count;
+    a->trace = heap_caps_calloc(1, sizeof(*a->trace), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    a->runner = automation_runner_create(a->manager, action_done, a);
     a->mutex = xSemaphoreCreateMutex();
     a->done = xSemaphoreCreateBinary();
-    esp_err_t err = a->runner && a->mutex && a->done ? nvs_flash_init_partition("rules") : ESP_ERR_NO_MEM;
+    esp_err_t err = a->trace && a->runner && a->mutex && a->done ? nvs_flash_init_partition("rules") : ESP_ERR_NO_MEM;
     if (err == ESP_OK)
-        err = nvs_open_from_partition("rules", "fabric_rules", NVS_READWRITE, &a->storage);
+        err = nvs_open_from_partition("rules", "automation", NVS_READWRITE, &a->storage);
     for (unsigned i = 1; err == ESP_OK && i <= SLOT_COUNT; i++) {
         char name[8];
         key_name(name, i);
@@ -806,6 +808,8 @@ esp_err_t fabric_automation_init(fabric_manager_handle_t manager, const fabric_r
         char msg[96];
         if (err == ESP_OK)
             err = prepare(a, body, false, &a->slots[i - 1], msg, sizeof(msg));
+        if (err == ESP_OK)
+            a->slots[i - 1]->id = ++a->next_rule_id;
         free(body);
     }
     if (err == ESP_OK && xTaskCreate(worker, "fabric_rules", 12288, a, 4, &a->worker) != pdPASS)
@@ -834,8 +838,8 @@ esp_err_t fabric_automation_list(fabric_automation_t a, char **out)
         cJSON *item = r ? cJSON_Parse(r->definition) : cJSON_CreateNull();
         ok = cJSON_AddItemToArray(list, item);
         if (ok && r)
-            ok = cJSON_AddStringToObject(item, "diagnostic", r->diagnostic) &&
-                (!r->visual || cJSON_AddStringToObject(item, "generated", r->body));
+            ok = cJSON_AddNumberToObject(item, "rule_id", r->id) &&
+                cJSON_AddStringToObject(item, "diagnostic", r->diagnostic);
     }
     xSemaphoreGive(a->mutex);
     *out = ok ? cJSON_PrintUnformatted(list) : NULL;
@@ -849,7 +853,16 @@ void fabric_automation_clock_synchronized(fabric_automation_t a)
     xTaskNotify(a->worker, 0, eNoAction);
     xSemaphoreGive(a->mutex);
 }
-void fabric_automation_set_changed_handler(fabric_automation_t a, void (*fn)(void))
+esp_err_t fabric_automation_runs(fabric_automation_t a, uint32_t id, char **out)
+{
+    if (!a || !out)
+        return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(a->mutex, portMAX_DELAY);
+    esp_err_t err = automation_trace_json(a->trace, id, out);
+    xSemaphoreGive(a->mutex);
+    return err;
+}
+void fabric_automation_set_changed_handler(fabric_automation_t a, void (*fn)(bool trace))
 {
     xSemaphoreTake(a->mutex, portMAX_DELAY);
     a->changed = fn;
@@ -870,7 +883,8 @@ void fabric_automation_close(fabric_automation_t a)
     for (unsigned i = 0; i < SLOT_COUNT; i++) destroy(a->slots[i]);
     if (a->storage)
         nvs_close(a->storage);
-    action_runner_delete(a->runner);
+    automation_runner_delete(a->runner);
+    free(a->trace);
     if (a->mutex)
         vSemaphoreDelete(a->mutex);
     if (a->done)

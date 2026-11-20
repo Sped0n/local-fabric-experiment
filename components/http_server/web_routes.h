@@ -2,8 +2,8 @@
 #include "cJSON.h"
 #include "esp_http_server.h"
 #include "fabric_automation.h"
-esp_err_t fabric_control_submit(const char *route, const cJSON *obj);
-char *fabric_status_json(void);
+esp_err_t http_submit_control(const char *route, const cJSON *obj);
+char *http_status_json(void);
 void fabric_http_status_changed(void);
 esp_err_t fabric_http_mcp_start(httpd_handle_t server, fabric_manager_handle_t manager, fabric_automation_t automation);
 esp_err_t fabric_http_access_init(void);

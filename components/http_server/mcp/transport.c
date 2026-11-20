@@ -79,7 +79,7 @@ static esp_err_t dispatch(httpd_req_t *r, const cJSON *obj, const char *id)
         !cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(meta, MCP_META "clientCapabilities")))
         return mcp_error(r, id, -32602, "Missing client metadata");
     if (!strcmp(method, "subscriptions/listen"))
-        return mcp_listen(r, id, params);
+        return mcp_subscriptions_listen(r, id, params);
     return mcp_catalog_request(r, id, method, params);
 }
 // Bound recursion before cJSON enters its parser on the HTTP server stack.
@@ -166,5 +166,5 @@ esp_err_t fabric_http_mcp_start(httpd_handle_t server, fabric_manager_handle_t m
         if (err != ESP_OK)
             return err;
     }
-    return mcp_watch_start(manager, automation);
+    return mcp_subscriptions_start(manager, automation);
 }

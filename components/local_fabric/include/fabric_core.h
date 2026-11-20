@@ -7,7 +7,7 @@
 
 /**
  * @file
- * @brief Public lifecycle, Matter report, and request API for Local Fabric.
+ * @brief Public lifecycle and Matter request API for Local Fabric.
  */
 
 #include <stdbool.h>
@@ -24,10 +24,6 @@ extern "C" {
 
 /** Opaque Local Fabric Core handle. */
 typedef struct fabric_core *fabric_core_handle_t;
-/** Nonzero identifier for an accepted asynchronous request. */
-/** Nonzero identifier for a registered public listener. */
-typedef uint32_t fabric_core_listener_id_t;
-
 /** Matter node and endpoint address. */
 typedef struct {
     uint64_t node_id;     /**< Commissioned Matter node identifier. */
@@ -73,42 +69,6 @@ typedef struct {
     char text[FABRIC_CORE_TEXT_MAX]; /**< String, octets, or JSON representation. */
 } fabric_core_value_t;
 
-/** State of a node's authoritative wildcard subscription. */
-typedef enum {
-    FABRIC_CORE_SUBSCRIPTION_CONNECTING = 0,
-    FABRIC_CORE_SUBSCRIPTION_ACTIVE,
-    FABRIC_CORE_SUBSCRIPTION_BACKOFF,
-    FABRIC_CORE_SUBSCRIPTION_TERMINATED,
-} fabric_core_subscription_state_t;
-
-/** Subscription-state notification for one commissioned node. */
-typedef struct {
-    uint64_t node_id;
-    fabric_core_subscription_state_t state;
-    esp_err_t cause; /**< ESP_OK or the transition's error cause. */
-} fabric_core_subscription_update_t;
-
-/** Public decoded attribute report, valid only during its callback. */
-typedef struct {
-    fabric_core_attribute_path_t path;
-    fabric_core_value_t value;
-    esp_err_t status;
-} fabric_core_attribute_report_t;
-
-/** Public Local Fabric Core listener callbacks. */
-typedef struct {
-    /** Called when a node subscription changes state. */
-    void (*subscription_changed)(fabric_core_handle_t core, const fabric_core_subscription_update_t *update,
-                                 void *user_ctx);
-    /** Called before attributes belonging to one report are delivered. */
-    void (*report_begin)(fabric_core_handle_t core, uint64_t node_id, void *user_ctx);
-    /** Called for each attribute in the active report. */
-    void (*attribute_reported)(fabric_core_handle_t core, const fabric_core_attribute_report_t *report, void *user_ctx);
-    /** Called once when the active report finishes. */
-    void (*report_end)(fabric_core_handle_t core, uint64_t node_id, esp_err_t error, void *user_ctx);
-    void *user_ctx; /**< Opaque callback context; NULL is valid. */
-} fabric_core_listener_t;
-
 /** Configuration copied by @ref fabric_core_create. */
 typedef struct {
     uint16_t max_nodes;                   /**< Maximum commissioned nodes owned by the core. */
@@ -146,11 +106,6 @@ esp_err_t fabric_core_stop(fabric_core_handle_t core);
 /** Deletes a stopped core. Lifecycle APIs cannot run from a core callback. */
 esp_err_t fabric_core_delete(fabric_core_handle_t core);
 
-/** Registers a listener and returns its nonzero identifier. */
-esp_err_t fabric_core_add_listener(fabric_core_handle_t core, const fabric_core_listener_t *listener,
-                                   fabric_core_listener_id_t *out_listener_id);
-/** Synchronously removes a listener outside its callbacks. */
-esp_err_t fabric_core_remove_listener(fabric_core_handle_t core, fabric_core_listener_id_t listener_id);
 /** Lists commissioned node identifiers using count-then-fill semantics. */
 esp_err_t fabric_core_get_node_ids(fabric_core_handle_t core, uint64_t *node_ids, size_t capacity, size_t *out_count);
 /** Starts asynchronous commissioning from a setup code. */

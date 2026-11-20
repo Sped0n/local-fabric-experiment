@@ -9,10 +9,7 @@
 namespace data_model::clusters::boolean_state {
 namespace {
 constexpr uint32_t kClusterId = UINT32_C(0x0045);
-struct state {
-    bool reported;
-    bool value;
-};
+using state = data_model::boolean_state;
 static_assert(sizeof(state) <= FABRIC_MANAGER_CLUSTER_STATE_MAX);
 CHIP_ERROR decode_attribute(uint32_t attribute_id, chip::TLV::TLVReader &reader, data_model::cluster_state *storage)
 {

@@ -11,6 +11,7 @@ import {
   connect,
 } from "./connection.js";
 import { RuleEditor } from "./rules/RuleEditor.jsx";
+import { DeviceActivity } from "./DeviceActivity.jsx";
 import { DevicePanel } from "./DevicePanel.jsx";
 import "./styles.css";
 
@@ -50,6 +51,7 @@ function App() {
         <Show when={token()}>
           <nav class="ml-auto flex gap-3" aria-label="Control panels">
             <a href="#devices">Devices</a>
+            <a href="#activity">Activity</a>
             <Show when={rules()}>
               <a href="#rules">Rules</a>
             </Show>
@@ -118,6 +120,7 @@ function App() {
           </details>
         </Show>
         <DevicePanel />
+        <DeviceActivity />
         <Show when={rules()}>
           <RuleEditor />
         </Show>

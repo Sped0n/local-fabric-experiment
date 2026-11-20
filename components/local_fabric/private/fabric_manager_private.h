@@ -10,6 +10,7 @@
 #include "data_model_shared_json.h"
 #include "fabric_core_private.h"
 #include "fabric_manager.h"
+#include "../activity/activity.h"
 
 #include "cJSON.h"
 #include "nvs.h"
@@ -51,6 +52,12 @@ private:
 };
 
 /** Adapter scalars plus immutable, shared variable-length metadata. */
+// Shared storage for single-property boolean clusters.
+struct boolean_state {
+    bool reported;
+    bool value;
+};
+
 struct cluster_state {
     alignas(max_align_t) uint8_t bytes[FABRIC_MANAGER_CLUSTER_STATE_MAX];
     shared_json metadata;
@@ -150,6 +157,7 @@ struct report {
     size_t cluster_count;
     bool overflowed;
     bool descriptor_invalid;
+    bool priming;
 };
 
 struct group {
@@ -167,13 +175,15 @@ esp_err_t resolve(const report &value, group *groups, size_t *out_group_count, u
 
 namespace model {
 esp_err_t replace_node(fabric_manager_handle_t manager, const report &value, device_set *out_set);
-esp_err_t apply(fabric_manager_handle_t manager, const report &value, bool *changed);
+esp_err_t apply(fabric_manager_handle_t manager, const report &value, unsigned *views);
 esp_err_t retain_nodes(fabric_manager_handle_t manager, const uint64_t *node_ids, size_t node_count,
                        device_set *out_set);
 void free(device_set *set);
 } // namespace model
 
 namespace json {
+unsigned record_public_changes(device_activity_t *activity, uint32_t device_id, uint16_t endpoint_id,
+                               const cluster_adapter &adapter, const cluster_state &before, const cluster_state &after);
 char *devices(const device_set &set, fabric_device_view_t view);
 char *list(const device_set &set, bool detailed = false);
 char *detail(const device_set &set, const device &value);
@@ -194,12 +204,9 @@ bool number(const cJSON *value, double minimum, double maximum, double *out_valu
 } // namespace json
 
 void free_report(report *transaction);
-void report_begin(fabric_core_handle_t core, uint64_t node_id, void *user_ctx);
+void report_begin(fabric_core_handle_t core, uint64_t node_id, bool priming, void *user_ctx);
 void attribute_reported(fabric_core_handle_t core, const fabric_core_private_attribute_report *value, void *user_ctx);
 void report_end(fabric_core_handle_t core, uint64_t node_id, esp_err_t error, bool snapshot_complete, void *user_ctx);
-
-// Caller holds state_mutex. No application code runs on the publisher's stack.
-void publish(fabric_manager_handle_t manager, unsigned views, uint64_t node_id = 0);
 
 namespace store {
 esp_err_t load(fabric_manager_handle_t manager, device **out_devices, size_t *out_device_count);
@@ -209,10 +216,14 @@ esp_err_t save(fabric_manager_handle_t manager, const device *devices, size_t de
 
 } // namespace data_model
 
+// Caller holds state_mutex; signal callbacks must not block.
+void manager_signal_changes(fabric_manager_handle_t manager, unsigned views, uint64_t node_id = 0);
+
 struct fabric_manager {
     fabric_core_handle_t core;
     nvs_handle_t nvs;
     data_model::device_set set;
+    device_activity_t activity;
     data_model::report *reports;
     fabric_manager_device_id_t next_device_id;
     SemaphoreHandle_t state_mutex;

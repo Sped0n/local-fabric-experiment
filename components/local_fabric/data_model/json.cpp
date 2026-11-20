@@ -62,12 +62,12 @@ cJSON *summary(const device &value)
     return object;
 }
 
-cJSON *encode(const cluster &value)
+cJSON *encode(const cluster_adapter &adapter, const cluster_state &state)
 {
     cJSON *object = cJSON_CreateObject();
     cJSON *properties = object ? cJSON_AddObjectToObject(object, "properties") : nullptr;
     cJSON *actions = object ? cJSON_AddObjectToObject(object, "actions") : nullptr;
-    if (!properties || !actions || value.adapter->encode_json(&value.state, properties, actions) != ESP_OK) {
+    if (!properties || !actions || adapter.encode_json(&state, properties, actions) != ESP_OK) {
         cJSON_Delete(object);
         return nullptr;
     }
@@ -75,6 +75,30 @@ cJSON *encode(const cluster &value)
 }
 
 } // namespace
+
+unsigned record_public_changes(device_activity_t *activity, uint32_t device_id, uint16_t endpoint_id,
+                               const cluster_adapter &adapter, const cluster_state &before, const cluster_state &after)
+{
+    json_owner old_view(encode(adapter, before)), new_view(encode(adapter, after));
+    if (!old_view || !new_view)
+        return FABRIC_DEVICE_STATE; // Keep state authoritative; readers can refresh.
+    if (cJSON_Compare(old_view.get(), new_view.get(), true))
+        return 0;
+    unsigned views = FABRIC_DEVICE_STATE; // Includes changed schema, available properties and command arguments.
+    const cJSON *old_properties = cJSON_GetObjectItemCaseSensitive(old_view.get(), "properties");
+    const cJSON *p;
+    cJSON_ArrayForEach(p, cJSON_GetObjectItemCaseSensitive(new_view.get(), "properties"))
+    {
+        const cJSON *old_value =
+            cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(old_properties, p->string), "value");
+        const cJSON *value = cJSON_GetObjectItemCaseSensitive(p, "value");
+        if (!old_value || cJSON_IsNull(old_value) || !value || cJSON_Compare(old_value, value, true))
+            continue;
+        device_activity_append(activity, device_id, endpoint_id, adapter.key, p);
+        views |= FABRIC_DEVICE_ACTIVITY;
+    }
+    return views;
+}
 
 static cJSON *detail_object(const device_set &set, const device &value);
 
@@ -115,7 +139,7 @@ static bool add_endpoints(cJSON *root, const device_set &set, const device &valu
         }
         for (size_t cluster_offset = 0; cluster_offset < endpoint.cluster_count; ++cluster_offset) {
             const auto &cluster = set.clusters[endpoint.first_cluster + cluster_offset];
-            cJSON *cluster_json = encode(cluster);
+            cJSON *cluster_json = encode(*cluster.adapter, cluster.state);
             if (!cluster_json || !cJSON_AddItemToObject(clusters, cluster.adapter->key, cluster_json)) {
                 cJSON_Delete(cluster_json);
                 return false;

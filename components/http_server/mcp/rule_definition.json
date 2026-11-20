@@ -1,59 +1,114 @@
 {
   "type": "object",
-  "required": ["mode", "enabled", "when"],
+  "required": ["enabled", "when", "source"],
+  "additionalProperties": false,
   "properties": {
-    "title": { "type": "string" },
-    "enabled": { "type": "boolean" },
+    "enabled": {
+      "type": "boolean"
+    },
+    "title": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Text Lua, compiled at save and executed only on watched changes. automation.skip(reason) records a skipped run."
+    },
+    "editor": {
+      "type": "object",
+      "description": "Optional visual editor draft; opaque to the board. Omit on raw replacement."
+    },
     "when": {
-      "description": "One property selector (device, endpoint, cluster, property) or named inputs. A raw clock input is {name:'clock',clock:'minute'}. A visual clock can specify at (local minute 0..1439) or start/end (same-day window), and weekdays (unique days 1..7, Monday first). Visual property tests also specify type and op.",
+      "description": "One property or 1–4 unique named property/minute inputs. Only these inputs wake the rule.",
       "oneOf": [
         {
           "type": "object",
-          "required": ["device", "endpoint", "cluster", "property"]
+          "required": ["device", "endpoint", "cluster", "property"],
+          "properties": {
+            "device": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            },
+            "endpoint": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "cluster": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 39
+            },
+            "property": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 39
+            }
+          },
+          "additionalProperties": false
         },
         {
           "type": "array",
           "minItems": 1,
           "maxItems": 4,
-          "items": { "type": "object", "required": ["name"] }
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "device",
+                  "endpoint",
+                  "cluster",
+                  "property",
+                  "name"
+                ],
+                "properties": {
+                  "device": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4294967295
+                  },
+                  "endpoint": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 65535
+                  },
+                  "cluster": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 39
+                  },
+                  "property": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 39
+                  },
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,22}$"
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": ["name", "clock"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,22}$"
+                  },
+                  "clock": {
+                    "const": "minute"
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
+          }
         }
       ]
     }
-  },
-  "oneOf": [
-    {
-      "properties": {
-        "mode": { "const": "raw" },
-        "source": { "type": "string", "minLength": 1 },
-        "action": false,
-        "conditions": false
-      },
-      "required": ["source"]
-    },
-    {
-      "properties": {
-        "mode": { "const": "visual" },
-        "source": false,
-        "conditions": {
-          "type": "array",
-          "maxItems": 4,
-          "description": "All must hold at trigger time. A clock condition uses clock:minute, optional weekdays and a window; it does not wake the rule.",
-          "items": { "type": "object" }
-        },
-        "action": {
-          "description": "One step or an ordered sequence: Matter (device, endpoint, cluster, name, arguments), local (native, arguments; see fabric://automation/actions), or delay (delay_s: 1..86400).",
-          "oneOf": [
-            { "type": "object" },
-            {
-              "type": "array",
-              "minItems": 1,
-              "maxItems": 8,
-              "items": { "type": "object" }
-            }
-          ]
-        }
-      },
-      "required": ["action"]
-    }
-  ]
+  }
 }

@@ -47,7 +47,6 @@ const phase = async (count, samples) => {
     await m.call("rule.save", {
       slot,
       definition: {
-        mode: "raw",
         enabled: true,
         title: prefix + slot,
         when,

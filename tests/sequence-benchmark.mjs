@@ -26,7 +26,7 @@ try {
       definition: {
         title: prefix + slot,
         enabled: true,
-        mode: "raw",
+
         when,
         source,
       },

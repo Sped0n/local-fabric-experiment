@@ -25,11 +25,20 @@
 #define FABRIC_CORE_IDENTITY_KEY "identity"
 #define FABRIC_CORE_MAX_SETUP_CODE_LENGTH 256U
 
-/** Registered public core listener. */
-struct fabric_core_listener_entry {
-    fabric_core_listener_id_t id;
-    fabric_core_listener_t listener;
-};
+/** State of a node's authoritative wildcard subscription. */
+typedef enum {
+    FABRIC_CORE_SUBSCRIPTION_CONNECTING = 0,
+    FABRIC_CORE_SUBSCRIPTION_ACTIVE,
+    FABRIC_CORE_SUBSCRIPTION_BACKOFF,
+    FABRIC_CORE_SUBSCRIPTION_TERMINATED,
+} fabric_core_subscription_state_t;
+
+/** Subscription-state notification for one commissioned node. */
+typedef struct {
+    uint64_t node_id;
+    fabric_core_subscription_state_t state;
+    esp_err_t cause; /**< ESP_OK or the transition's error cause. */
+} fabric_core_subscription_update_t;
 
 /** Commissioned node and its owned subscription. */
 struct fabric_core_node {
@@ -45,15 +54,15 @@ struct fabric_core_private_attribute_report {
     CHIP_ERROR error;
 };
 
-/** Single private listener used by the optional semantic device manager. */
-struct fabric_core_private_listener {
+/** Single model listener used by the optional semantic device manager. */
+struct core_model_listener {
     /** Called after the commissioned node set changes. */
     void (*node_set_changed)(fabric_core_handle_t core, void *user_ctx);
     /** Called when a node subscription changes state. */
     void (*subscription_changed)(fabric_core_handle_t core, const fabric_core_subscription_update_t *update,
                                  void *user_ctx);
     /** Opens one report transaction for the given node. */
-    void (*report_begin)(fabric_core_handle_t core, uint64_t node_id, void *user_ctx);
+    void (*report_begin)(fabric_core_handle_t core, uint64_t node_id, bool priming, void *user_ctx);
     /** Delivers one raw TLV attribute in the corresponding node report. */
     void (*attribute_reported)(fabric_core_handle_t core, const fabric_core_private_attribute_report *report,
                                void *user_ctx);
@@ -76,7 +85,7 @@ enum fabric_core_lifecycle_t {
 /**
  * @brief Core mutable state owned by the CHIP stack lock.
  *
- * The explicit installation flag is authoritative because a private listener
+ * The explicit installation flag is authoritative because a model listener
  * may legally use a NULL callback context.
  */
 struct fabric_core {
@@ -87,8 +96,6 @@ struct fabric_core {
     uint32_t active_requests;
     SemaphoreHandle_t stop_event;
 
-    fabric_core_listener_id_t next_listener_id;
-
     uint64_t controller_node_id;
     uint64_t fabric_id;
     uint64_t next_node_id;
@@ -96,9 +103,8 @@ struct fabric_core {
     fabric_core_node *nodes;
     size_t node_count;
 
-    fabric_core_listener_entry listeners[CONFIG_FABRIC_CORE_MAX_LISTENERS];
-    fabric_core_private_listener private_listener;
-    bool private_listener_installed;
+    core_model_listener model_listener;
+    bool model_listener_installed;
 };
 
 /** Finds a commissioned node while the caller holds the CHIP stack lock. */
@@ -109,11 +115,11 @@ esp_err_t fabric_core_request_begin(fabric_core_handle_t core);
 /** Ends one request and signals a waiting stop when the count reaches zero. */
 void fabric_core_request_end(fabric_core_handle_t core);
 
-/** Installs the sole private listener before the core starts. */
-esp_err_t fabric_core_private_set_listener(fabric_core_handle_t core, const fabric_core_private_listener *listener);
-/** Clears the matching private listener after the core stops. */
-esp_err_t fabric_core_private_clear_listener(fabric_core_handle_t core, void *user_ctx);
-/** Notifies the private listener that commissioned nodes changed. */
+/** Installs the sole model listener before the core starts. */
+esp_err_t core_set_model_listener(fabric_core_handle_t core, const core_model_listener *listener);
+/** Clears the matching model listener after the core stops. */
+esp_err_t core_clear_model_listener(fabric_core_handle_t core, void *user_ctx);
+/** Notifies the model listener that commissioned nodes changed. */
 void fabric_core_private_notify_node_set_changed(fabric_core_handle_t core);
 
 /** Initializes CHIP controller and fabric resources. */
@@ -157,5 +163,3 @@ esp_err_t fabric_core_chip_remove_node(fabric_core_handle_t core, uint64_t node_
 
 /** Maps a CHIP error to the public ESP-IDF error domain. */
 esp_err_t fabric_core_from_chip_error(CHIP_ERROR error);
-/** Converts one raw TLV value for the bounded public core API. */
-CHIP_ERROR fabric_core_decode_tlv_value(chip::TLV::TLVReader &reader, fabric_core_value_t &value);

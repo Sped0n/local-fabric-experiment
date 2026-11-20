@@ -15,12 +15,12 @@ static esp_err_t enqueue_note(void *ctx, const char *args)
 }
 esp_err_t demo_start_automation(fabric_manager_handle_t manager, fabric_automation_t *out)
 {
-    static const fabric_rule_arg_t fields[] = {{"text", FABRIC_ARG_STRING}};
-    static const fabric_rule_action_t actions[] = {{.name = "demo.enqueue_note",
-                                                    .description = "Queue a text note for the board console.",
-                                                    .arguments = fields,
-                                                    .argument_count = 1,
-                                                    .try_enqueue = enqueue_note}};
+    static const fabric_automation_arg_t fields[] = {{"text", FABRIC_AUTOMATION_ARG_STRING}};
+    static const fabric_automation_hook_t actions[] = {{.name = "demo.enqueue_note",
+                                                        .description = "Queue a text note for the board console.",
+                                                        .arguments = fields,
+                                                        .argument_count = 1,
+                                                        .try_enqueue = enqueue_note}};
     esp_err_t err = esp_event_handler_register(DEMO_NOTE, 0, log_note, NULL);
     if (err != ESP_OK)
         return err;

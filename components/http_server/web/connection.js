@@ -8,6 +8,7 @@ const [token, setToken] = createSignal(""),
   [notice, setNotice] = createSignal("");
 const [devices, setDevices] = createStore([]),
   [deviceState, setDeviceState] = createStore({}),
+  [deviceActivity, setDeviceActivity] = createSignal(null),
   [rules, setRules] = createSignal(null),
   [localActions, setLocalActions] = createSignal([]);
 async function attempt(fn) {
@@ -37,6 +38,7 @@ function connect() {
       setDevices(reconcile([]));
       setDeviceState(reconcile({}));
       setRules(null);
+      setDeviceActivity(null);
       setLocalActions([]);
       return;
     }
@@ -53,6 +55,7 @@ function connect() {
             [
               "fabric://devices/metadata",
               "fabric://devices/state",
+              "fabric://activity",
               "fabric://automation/actions",
               "fabric://automation/rules",
             ],
@@ -74,6 +77,7 @@ function connect() {
                 );
               if (uri === "fabric://devices/state")
                 setDeviceState(reconcile(snapshot.devices));
+              if (uri === "fabric://activity") setDeviceActivity(snapshot);
               if (uri === "fabric://automation/actions")
                 setLocalActions(snapshot);
               if (uri === "fabric://automation/rules") setRules(snapshot);
@@ -105,6 +109,7 @@ export {
   setNotice,
   devices,
   deviceState,
+  deviceActivity,
   rules,
   setRules,
   localActions,

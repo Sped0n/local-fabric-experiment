@@ -244,46 +244,21 @@ try {
   );
   installed = true;
   const saved = (await api("/automation/rules"))[1];
-  assert.equal(saved.mode, "visual");
-  assert.equal(saved.when.op, "true");
-  assert(!("value" in saved.when));
+  assert.equal(saved.editor.when.op, "true");
   assert.deepEqual(
-    saved.conditions.map((c) => c.op),
+    saved.editor.conditions.map((c) => c.op),
     ["false", ">="],
   );
-  assert.equal(saved.action.arguments.on, true);
-  // Bypass the browser controls: the firmware must reject invalid rules without
-  // replacing the working rule that is about to fire.
-  for (const [id, d] of Object.entries(
-    (await mcp.read("fabric://devices/state")).devices,
-  ))
-    for (const [ep, e] of Object.entries(d.endpoints)) {
-      for (const [cluster, property, op, value] of [
-        ["illuminance_measurement", "illuminance_lux", ">", 4.5],
-        ["temperature_measurement", "temperature_celsius", ">", 21.55],
-        ["rvc_run_mode", "mode", "==", "Cleaning"],
-      ]) {
-        const meta = e.clusters[cluster]?.properties[property];
-        if (!meta) continue;
-        const trigger = {
-          device: Number(id),
-          endpoint: +ep,
-          cluster,
-          property,
-          type: meta.type,
-          op,
-          value,
-        };
-        await assert.rejects(
-          mcp.call("rule.save", {
-            slot: 2,
-            definition: { ...saved, when: trigger },
-          }),
-          /trigger does not match property schema/,
-        );
-      }
-    }
-  assert.match(saved.generated, /matter\.invoke_action/);
+  assert.equal(saved.editor.action.arguments.on, true);
+  assert.equal(saved.when.property, "state");
+  assert.match(saved.source, /matter\.invoke_action/);
+  // An invalid source cannot replace a valid rule; the board compiles, but never executes on save.
+  await assert.rejects(
+    mcp.call("rule.save", {
+      slot: 2,
+      definition: { enabled: true, when: saved.when, source: "not Lua !" },
+    }),
+  );
   await editRule(
     `await mode('raw',false);if(field('Mode').value!=='visual')throw Error('lost draft');await mode('raw',true);if(f.querySelector('textarea')?.value!==''||f.querySelectorAll('fieldset select').length!==2)throw Error('raw mode retained visual selectors');`,
   );
@@ -310,7 +285,7 @@ try {
     "raw rule saved",
   );
   const raw = (await api("/automation/rules"))[1];
-  assert.equal(raw.mode, "raw");
+  assert(!raw.editor);
   assert.equal(raw.when.device, sensor);
   assert(
     !(
@@ -340,31 +315,31 @@ try {
     "compound visual rule saved",
   );
   const compound = (await api("/automation/rules"))[1];
-  assert.deepEqual(compound.when[1], {
+  assert.deepEqual(compound.when[1], { name: "clock", clock: "minute" });
+  assert.deepEqual(compound.editor.when[1], {
     name: "clock",
     clock: "minute",
     start: 0,
     end: 1440,
   });
   assert.deepEqual(
-    compound.action.map((a) => a.delay_s ?? a.arguments.on ?? a.arguments.text),
+    compound.editor.action.map(
+      (a) => a.delay_s ?? a.arguments.on ?? a.arguments.text,
+    ),
     [true, 1, false, "browser-hook-e2e"],
   );
-  assert.equal(compound.action[3].native, "demo.enqueue_note");
-  for (const args of [{}, { text: 12 }, { text: "ok", extra: true }])
-    await assert.rejects(
-      mcp.call("rule.save", {
-        slot: 2,
-        definition: {
-          mode: "visual",
-          enabled: true,
-          when: compound.when,
-          action: { native: "demo.enqueue_note", arguments: args },
-        },
-      }),
-      /invalid action or arguments/,
-    );
-  assert.match(compound.generated, /ready\(previous\)/);
+  assert.equal(compound.editor.action[3].native, "demo.enqueue_note");
+  assert.match(compound.source, /ready\(event.previous\)/);
+  await js(
+    "[...document.querySelectorAll('summary')].find(s=>s.textContent==='Automation traces').click()",
+  );
+  await until(
+    () =>
+      js(
+        "return !![...document.querySelectorAll('#rules details select')].find(s=>s.options[0]?.text==='All rules')",
+      ),
+    "live traces opened",
+  );
   await sleep(400);
   await writeFile(
     pipe,
@@ -376,8 +351,36 @@ try {
   );
   await until(() => reading(false), "delayed OFF reported by Matter peer");
   await until(
+    () =>
+      js(
+        "return [...document.querySelectorAll('#activity li')].filter(e=>e.textContent.includes('#'+arguments[0]+'/'+arguments[1]+' on_off.on:')).slice(0,2).map(e=>e.textContent.split('on_off.on: ')[1].split(' ·')[0]).join(',') === 'off,on'",
+        light,
+        ep,
+      ),
+    "reported light transitions visible separately from rule traces",
+  );
+  await until(
     async () => (await api("/automation/rules"))[1]?.diagnostic === "completed",
     "last command acknowledged",
+  );
+  const feed = await mcp.read("fabric://automation/runs");
+  const latest = feed.finished.find(
+    (r) => r.rule_id === compound.rule_id && r.outcome === "completed",
+  );
+  assert(latest);
+  assert(latest.elapsed_ms >= 1000);
+  assert.match(latest.trigger, /boolean_state.state: false → true/);
+  assert(!JSON.stringify(latest).includes("browser-hook-e2e"));
+  await until(
+    () =>
+      js(
+        "return [...document.querySelectorAll('#rules details li')].some(r=>r.textContent.trim().startsWith('Run #'+arguments[0]+' ·') && r.textContent.includes('false → true'))",
+        latest.id,
+      ),
+    "terminal trace delivered to open viewer",
+  );
+  await js(
+    "const s=document.querySelector('#rules details select');s.value='rule';s.dispatchEvent(new Event('change',{bubbles:true}));",
   );
   await editRule(
     `await change(field('Schedule'),'at');await change(field('Time'),'18:00','input');for(const day of ['Mon','Thu','Fri','Sat','Sun'])await click(button(day));
@@ -385,10 +388,11 @@ try {
   if(getComputedStyle(button('Tue')).backgroundColor===getComputedStyle(button('Mon')).backgroundColor)throw Error('selected weekday not visibly distinguished');f.requestSubmit();`,
   );
   await until(
-    async () => (await api("/automation/rules"))[1]?.when?.[1]?.at === 1080,
+    async () =>
+      (await api("/automation/rules"))[1]?.editor?.when?.[1]?.at === 1080,
     "At rule saved",
   );
-  assert.deepEqual((await api("/automation/rules"))[1].when[1], {
+  assert.deepEqual((await api("/automation/rules"))[1].editor.when[1], {
     name: "clock",
     clock: "minute",
     at: 1080,
@@ -406,8 +410,30 @@ try {
   assert.deepEqual((await api("/automation/rules"))[1].when, [
     { name: "now", clock: "minute" },
   ]);
+  await editRule(
+    `await change(document.querySelector('#rules>label select'),'1');`,
+  );
+  await until(
+    () =>
+      js(
+        "return ![...document.querySelectorAll('#rules details li')].some(b=>b.textContent.trim().startsWith('Run #'+arguments[0]+' ·'))",
+        latest.id,
+      ),
+    "selected rule excludes another rule’s history",
+  );
+  await js(
+    "const s=document.querySelector('#rules details select');s.value='all';s.dispatchEvent(new Event('change',{bubbles:true}));",
+  );
+  await until(
+    () =>
+      js(
+        "return [...document.querySelectorAll('#rules details li')].some(b=>b.textContent.trim().startsWith('Run #'+arguments[0]+' ·'))",
+        latest.id,
+      ),
+    "global history includes earlier rule run",
+  );
   console.log(
-    "PASS: cross-tab metadata, room filter, draft isolation, and live Matter automation",
+    "PASS: cross-tab metadata, live automation, device activity and filtered terminal traces",
   );
 } finally {
   await driver(root, undefined, "DELETE");

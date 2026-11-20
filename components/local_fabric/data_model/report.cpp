@@ -299,7 +299,8 @@ data_model::reported_cluster *get_report_cluster(fabric_manager_handle_t manager
     auto &cluster = transaction.clusters[transaction.cluster_count++];
     cluster.endpoint_id = endpoint_id;
     cluster.adapter_index = static_cast<uint8_t>(index);
-    copy_committed_state(manager, transaction.node_id, endpoint_id, adapter, &cluster.state);
+    if (!transaction.priming)
+        copy_committed_state(manager, transaction.node_id, endpoint_id, adapter, &cluster.state);
     return &cluster;
 }
 
@@ -387,7 +388,7 @@ esp_err_t commit_snapshot(fabric_manager_handle_t manager, const data_model::rep
             unsigned views = FABRIC_DEVICE_STATE; // Includes properties removed by this replacement.
             if (!same_metadata(previous, replacement))
                 views |= FABRIC_DEVICE_METADATA;
-            data_model::publish(manager, views);
+            manager_signal_changes(manager, views);
             replacement = {};
             data_model::model::free(&previous);
         }
@@ -398,11 +399,11 @@ esp_err_t commit_snapshot(fabric_manager_handle_t manager, const data_model::rep
 
 esp_err_t apply_change_report(fabric_manager_handle_t manager, const data_model::report &transaction)
 {
-    bool changed = false;
+    unsigned views = 0;
     data_model::lock_guard lock(manager->state_mutex);
-    esp_err_t err = data_model::model::apply(manager, transaction, &changed);
-    if (err == ESP_OK && changed)
-        data_model::publish(manager, FABRIC_DEVICE_STATE, transaction.node_id);
+    esp_err_t err = data_model::model::apply(manager, transaction, &views);
+    if (err == ESP_OK && views)
+        manager_signal_changes(manager, views, transaction.node_id);
     return err;
 }
 
@@ -414,7 +415,7 @@ void data_model::free_report(report *transaction)
     free(transaction);
 }
 
-void data_model::report_begin(fabric_core_handle_t, uint64_t node_id, void *user_ctx)
+void data_model::report_begin(fabric_core_handle_t, uint64_t node_id, bool priming, void *user_ctx)
 {
     auto manager = static_cast<fabric_manager_handle_t>(user_ctx);
     if (!manager || find_report(manager, node_id))
@@ -427,6 +428,7 @@ void data_model::report_begin(fabric_core_handle_t, uint64_t node_id, void *user
     if (transaction) {
         new (transaction) data_model::report{};
         transaction->node_id = node_id;
+        transaction->priming = priming;
         transaction->next = manager->reports;
         manager->reports = transaction;
     }

@@ -3,7 +3,7 @@ if(CONFIG_FABRIC_AUTOMATION)
 endif()
 
 idf_component_register(
-    SRC_DIRS core manager ${automation_dir} data_model
+    SRC_DIRS core manager activity ${automation_dir} data_model
              data_model/clusters/boolean_state
              data_model/clusters/color_control
              data_model/clusters/fan_control

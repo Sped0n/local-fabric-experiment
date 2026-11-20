@@ -40,7 +40,7 @@ typedef struct {
     uint16_t endpoint;
     char cluster[40], property[40];
 } fabric_property_path_t;
-typedef enum { FABRIC_DEVICE_METADATA = 1, FABRIC_DEVICE_STATE = 2 } fabric_device_view_t;
+typedef enum { FABRIC_DEVICE_METADATA = 1, FABRIC_DEVICE_STATE = 2, FABRIC_DEVICE_ACTIVITY = 4 } fabric_device_view_t;
 // Under the Manager lock: signal only. Views is a bitmask; devices is a hint (IDs modulo 32).
 typedef void (*fabric_change_signal_t)(void *ctx, unsigned views, uint32_t devices);
 esp_err_t fabric_manager_add_signal(fabric_manager_handle_t manager, fabric_change_signal_t notify, void *ctx);
@@ -60,6 +60,9 @@ esp_err_t fabric_manager_create(fabric_core_handle_t core, fabric_manager_handle
  * removal are in progress, including deletion attempted from a callback.
  */
 esp_err_t fabric_manager_delete(fabric_manager_handle_t manager);
+
+/** Latest observed device transitions, newest first; caller frees JSON. Independent of automation. */
+esp_err_t fabric_manager_activity_json(fabric_manager_handle_t manager, char **out);
 
 /** Allocate one aggregate {"devices":{"<id>":{...}}}. Metadata contains type/name/room; state contains
  * online/endpoints. */

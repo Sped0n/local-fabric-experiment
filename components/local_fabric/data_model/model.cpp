@@ -200,8 +200,7 @@ esp_err_t initialize_device(fabric_manager_handle_t manager, const data_model::r
     return ESP_OK;
 }
 
-void append_endpoint_clusters(fabric_manager_handle_t manager, const data_model::report &report,
-                              const data_model::reported_endpoint &reported_endpoint,
+void append_endpoint_clusters(const data_model::report &report, const data_model::reported_endpoint &reported_endpoint,
                               data_model::device_set &replacement, size_t endpoint_cursor, size_t *cluster_cursor)
 {
     auto &endpoint = replacement.endpoints[endpoint_cursor];
@@ -214,12 +213,8 @@ void append_endpoint_clusters(fabric_manager_handle_t manager, const data_model:
         cluster.endpoint_index = endpoint_cursor;
         cluster.adapter = data_model::cluster_at(adapter_index);
         const auto *reported = find_report(report, endpoint.endpoint_id, adapter_index);
-        if (reported) {
+        if (reported)
             cluster.state = reported->state;
-        } else if (const auto *committed =
-                       find_cluster(manager->set, report.node_id, endpoint.endpoint_id, cluster.adapter)) {
-            cluster.state = committed->state;
-        }
         ++endpoint.cluster_count;
     }
 }
@@ -255,7 +250,7 @@ esp_err_t append_group(fabric_manager_handle_t manager, const data_model::report
         } else {
             snprintf(endpoint.name, sizeof(endpoint.name), "Endpoint %u", endpoint.endpoint_id);
         }
-        append_endpoint_clusters(manager, report, reported_endpoint, replacement, *endpoint_cursor, cluster_cursor);
+        append_endpoint_clusters(report, reported_endpoint, replacement, *endpoint_cursor, cluster_cursor);
         ++device.endpoint_count;
         ++*endpoint_cursor;
     }
@@ -319,9 +314,9 @@ esp_err_t data_model::model::replace_node(fabric_manager_handle_t manager, const
     return ESP_OK;
 }
 
-esp_err_t data_model::model::apply(fabric_manager_handle_t manager, const data_model::report &report, bool *changed)
+esp_err_t data_model::model::apply(fabric_manager_handle_t manager, const data_model::report &report, unsigned *views)
 {
-    *changed = false;
+    *views = 0;
     for (size_t i = 0; i < report.cluster_count; ++i) {
         const auto &incoming = report.clusters[i];
         if (!incoming.touched)
@@ -337,8 +332,10 @@ esp_err_t data_model::model::apply(fabric_manager_handle_t manager, const data_m
             (before.metadata.get() == after.metadata.get() ||
              cJSON_Compare(before.metadata.get(), after.metadata.get(), true)))
             continue;
-        before = after;
-        *changed = true;
+        const auto &ep = manager->set.endpoints[cluster->endpoint_index];
+        *views |= json::record_public_changes(&manager->activity, manager->set.devices[ep.device_index].id,
+                                              ep.endpoint_id, *adapter, before, after);
+        before = after; // Commit raw state even if the public value is unchanged or comparison failed.
     }
     for (size_t index = 0; index < report.endpoint_count; ++index) {
         const auto &reported = report.endpoints[index];
@@ -358,7 +355,7 @@ esp_err_t data_model::model::apply(fabric_manager_handle_t manager, const data_m
             }
             if (strcmp(endpoint.name, name)) {
                 snprintf(endpoint.name, sizeof(endpoint.name), "%s", name);
-                *changed = true;
+                *views |= FABRIC_DEVICE_STATE;
             }
             break;
         }

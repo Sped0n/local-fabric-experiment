@@ -17,6 +17,8 @@ import {
 } from "./PropertyFields.jsx";
 import { ClockFields, clockOption } from "./ClockFields.jsx";
 import { WhenFields } from "./WhenFields.jsx";
+import { savedRule } from "./compile.js";
+import { Traces } from "./Traces.jsx";
 import { ActionSteps } from "./ActionSteps.jsx";
 
 const blankRule = () => ({
@@ -39,7 +41,18 @@ export function RuleEditor() {
     ]);
   function load(i, rows = rules()) {
     selectSlot(i);
-    setDraft(rows?.[i - 1] ? { ...rows[i - 1] } : blankRule());
+    const r = rows?.[i - 1];
+    setDraft(
+      !r
+        ? blankRule()
+        : {
+            enabled: r.enabled,
+            title: r.title,
+            ...(r.editor
+              ? { ...r.editor, mode: "visual" }
+              : { mode: "raw", when: r.when, source: r.source }),
+          },
+    );
   }
   onSettled(() => {
     load(1);
@@ -64,9 +77,7 @@ export function RuleEditor() {
   ]);
   const descriptor = (v) => actions().find((a) => pathKey(a) === pathKey(v));
   async function save(form) {
-    let def = { ...draft() };
-    delete def.diagnostic;
-    delete def.generated;
+    const def = { ...draft() };
     if (
       !def.when ||
       (Array.isArray(def.when) && !def.when.length) ||
@@ -90,7 +101,10 @@ export function RuleEditor() {
       def.action = items.length === 1 ? items[0] : items;
       delete def.source;
     }
-    await mcp.call("rule.save", { slot: slot(), definition: def });
+    await mcp.call("rule.save", {
+      slot: slot(),
+      definition: savedRule(def, props(), actions()),
+    });
     await reload(slot());
     setNotice("Rule saved on board");
   }
@@ -276,14 +290,15 @@ export function RuleEditor() {
         >
           Delete rule
         </button>
-        <Show when={rules()?.[slot() - 1]?.generated}>
+        <Show when={rules()?.[slot() - 1]?.editor}>
           <details>
             <summary>View saved rule as Lua</summary>
-            <pre>{rules()[slot() - 1].generated}</pre>
+            <pre>{rules()[slot() - 1].source}</pre>
           </details>
         </Show>
         <small>{rules()?.[slot() - 1]?.diagnostic}</small>
       </form>
+      <Traces ruleId={rules()?.[slot() - 1]?.rule_id} />
     </section>
   );
 }
