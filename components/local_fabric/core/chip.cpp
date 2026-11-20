@@ -65,7 +65,6 @@ void fabric_core_finish_commissioning(CHIP_ERROR chip_error)
         } else {
             node = &core->nodes[core->node_count++];
             node->node_id = context.node_id;
-            node->subscription_state = FABRIC_CORE_SUBSCRIPTION_TERMINATED;
         }
 
         if (error == ESP_OK) {

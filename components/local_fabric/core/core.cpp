@@ -244,6 +244,14 @@ esp_err_t core_clear_model_listener(fabric_core_handle_t core, void *user_ctx)
     return ESP_OK;
 }
 
+void fabric_core_private_notify_node_set_changed(fabric_core_handle_t core)
+{
+    esp_matter::lock::ScopedChipStackLock lock(portMAX_DELAY);
+    const auto &listener = core->model_listener;
+    if (core->lifecycle == FABRIC_CORE_RUNNING && core->model_listener_installed && listener.node_set_changed)
+        listener.node_set_changed(core, listener.user_ctx);
+}
+
 esp_err_t fabric_core_get_node_ids(fabric_core_handle_t core, uint64_t *node_ids, size_t capacity, size_t *out_count)
 {
     ESP_RETURN_ON_FALSE(core && out_count && (capacity == 0 || node_ids), ESP_ERR_INVALID_ARG, kTag, "invalid output");

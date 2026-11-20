@@ -93,25 +93,22 @@ void on_node_set_changed(fabric_core_handle_t, void *user_ctx)
     }
 }
 
-void on_subscription_changed(fabric_core_handle_t, const fabric_core_subscription_update_t *update, void *user_ctx)
+void on_node_offline(fabric_core_handle_t, uint64_t node_id, void *user_ctx)
 {
     auto manager = static_cast<fabric_manager_handle_t>(user_ctx);
-    if (!manager || !update)
-        return;
-    const bool online = update->state == FABRIC_CORE_SUBSCRIPTION_ACTIVE;
     bool changed = false;
     {
         data_model::lock_guard lock(manager->state_mutex);
         for (size_t index = 0; index < manager->set.device_count; ++index) {
             auto &device = manager->set.devices[index];
-            if (device.node_id == update->node_id && device.online != online) {
-                device.online = online;
+            if (device.node_id == node_id && device.online) {
+                device.online = false;
                 device.baseline_epoch = ++manager->next_epoch;
                 changed = true;
             }
         }
         if (changed)
-            manager_signal_changes(manager, FABRIC_DEVICE_STATE, update->node_id);
+            manager_signal_changes(manager, FABRIC_DEVICE_STATE, node_id);
     }
 }
 
@@ -152,7 +149,7 @@ esp_err_t fabric_manager_create(fabric_core_handle_t core, fabric_manager_handle
     }
     const core_model_listener listener = {
         .node_set_changed = on_node_set_changed,
-        .subscription_changed = on_subscription_changed,
+        .node_offline = on_node_offline,
         .report_begin = data_model::report_begin,
         .attribute_reported = data_model::attribute_reported,
         .report_end = data_model::report_end,

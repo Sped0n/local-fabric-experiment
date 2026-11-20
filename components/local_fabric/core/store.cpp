@@ -88,7 +88,6 @@ esp_err_t fabric_core_store_load(fabric_core_handle_t core)
     if (error == ESP_OK) {
         for (size_t i = 0; i < core->node_count; ++i) {
             core->nodes[i].node_id = ids[i];
-            core->nodes[i].subscription_state = FABRIC_CORE_SUBSCRIPTION_TERMINATED;
         }
     }
     free(ids);

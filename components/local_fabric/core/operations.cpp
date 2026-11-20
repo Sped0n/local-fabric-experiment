@@ -14,7 +14,6 @@
 
 #include <app/ReadClient.h>
 #include <app/WriteClient.h>
-#include <controller/CommissioneeDeviceProxy.h>
 #include <lib/core/TLV.h>
 #include <platform/CHIPDeviceLayer.h>
 
@@ -48,9 +47,8 @@ public:
 protected:
     chip::ScopedNodeId target() const
     {
-        return chip::ScopedNodeId(
-            node_id_,
-            esp_matter::controller::matter_controller_client::get_instance().get_commissioner()->GetFabricIndex());
+        return chip::ScopedNodeId(node_id_,
+                                  esp_matter::controller::matter_controller_client::get_instance().get_fabric_index());
     }
     void finish(esp_err_t error, const fabric_core_value_t *value = nullptr)
     {

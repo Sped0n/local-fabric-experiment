@@ -25,26 +25,12 @@
 #define FABRIC_CORE_IDENTITY_KEY "identity"
 #define FABRIC_CORE_MAX_SETUP_CODE_LENGTH 256U
 
-/** State of a node's authoritative wildcard subscription. */
-typedef enum {
-    FABRIC_CORE_SUBSCRIPTION_CONNECTING = 0,
-    FABRIC_CORE_SUBSCRIPTION_ACTIVE,
-    FABRIC_CORE_SUBSCRIPTION_BACKOFF,
-    FABRIC_CORE_SUBSCRIPTION_TERMINATED,
-} fabric_core_subscription_state_t;
-
-/** Subscription-state notification for one commissioned node. */
-typedef struct {
-    uint64_t node_id;
-    fabric_core_subscription_state_t state;
-    esp_err_t cause; /**< ESP_OK or the transition's error cause. */
-} fabric_core_subscription_update_t;
+struct fabric_core_subscription;
 
 /** Commissioned node and its owned subscription. */
 struct fabric_core_node {
     uint64_t node_id;
-    void *subscription;
-    fabric_core_subscription_state_t subscription_state;
+    fabric_core_subscription *subscription;
 };
 
 /** Callback-scoped raw TLV attribute report for the private semantic sink. */
@@ -58,9 +44,8 @@ struct fabric_core_private_attribute_report {
 struct core_model_listener {
     /** Called after the commissioned node set changes. */
     void (*node_set_changed)(fabric_core_handle_t core, void *user_ctx);
-    /** Called when a node subscription changes state. */
-    void (*subscription_changed)(fabric_core_handle_t core, const fabric_core_subscription_update_t *update,
-                                 void *user_ctx);
+    /** Called when the subscription is lost or stopped. A committed snapshot brings the node online. */
+    void (*node_offline)(fabric_core_handle_t core, uint64_t node_id, void *user_ctx);
     /** Opens one report transaction for the given node. */
     void (*report_begin)(fabric_core_handle_t core, uint64_t node_id, bool priming, void *user_ctx);
     /** Delivers one raw TLV attribute in the corresponding node report. */
